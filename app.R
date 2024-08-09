@@ -1,0 +1,5837 @@
+library(shiny)
+library(shinythemes)
+library(shinyFeedback)
+library(rsm)
+library(glue)
+library(DT)
+library(memoise)
+library(vroom)
+library(tools)
+library(thematic)
+library(modelr)
+library(FrF2)
+library(mixexp)
+library(tidyverse)
+
+## Make ggplot themes automatic
+
+thematic_shiny()
+
+
+## Function Section
+
+## UI Section
+
+
+ui <- fluidPage(
+    shinyFeedback::useShinyFeedback(),
+    tags$head(
+             tags$style(HTML(
+                          ".shiny-output-error-validation {
+                           color: #ff0000;
+                           font-weight: bold;
+                           }
+                           "))),
+    navbarPage(title = "Design of Experiment - Select Design Type",
+               navbarMenu("Optimization",
+                          tabPanel("Central Composite Design",
+                                   tags$h1("Central Composite Design"),
+                                   tabsetPanel(
+                                       navbarMenu("Create Central Composite Design",
+                                                  tabPanel("Create Design",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter the Factors in your Central Composite Design."),
+                                                                   helpText("Factors names should be strings and distinct."),
+                                                                   textInput("ccd.factor.input",
+                                                                             "Enter Factor Name",
+                                                                             placeholder = "Factor Name Cannot be a Number"),
+                                                                   numericInput("ccd.center.point",
+                                                                                "Enter Center Point",
+                                                                                value = NULL),
+                                                                   numericInput("ccd.range",
+                                                                                "Enter Experiment Range",
+                                                                                value = NULL),
+                                                                   actionButton("ccd.term.enter",
+                                                                                "Enter Design Component"),
+                                                                   actionButton("ccd.term.delete",
+                                                                                "Delete Entry")
+                                                               ),
+                                                               mainPanel(
+                                                                   DTOutput("ccd.design.table"),
+                                                                   helpText("Central Composite Design Table")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Tune Design",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   sliderInput(
+                                                                       "ccd.n0s",
+                                                                       "Center Points",
+                                                                       min = 0,
+                                                                       max = 10,
+                                                                       value = 2,
+                                                                       step = 2
+                                                                   ),
+                                                                   selectInput("ccd.shape",
+                                                                               "Select Design Geometry",
+                                                                               choices = c("orthogonal",
+                                                                                           "rotatable",
+                                                                                           "spherical",
+                                                                                           "faces")
+                                                                               )
+                                                               ),
+                                                               mainPanel(
+                                                                   tags$h2("2D Design Representation - Central Composite Design"),
+                                                                   plotOutput("ccd.design.plot")
+                                                                   ##tableOutput(outputId = "ccd.table")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Raw Data / Download",
+                                                           tags$h2("Design Representation - Raw Data"),
+                                                           ##plotOutput("ccd.design.plot")
+                                                           tableOutput(outputId = "ccd.table"),
+                                                           downloadButton("download.ccd")
+                                                           )
+                                                  ),
+                                       tabPanel("Import / View Data",
+                                                sidebarLayout(
+                                                    sidebarPanel(
+                                                        helpText("Upload design with 'Run' column and design components only."),
+                                                        helpText("Once design is uploaded, add response data with 'Run' column and responses."),
+                                                        helpText("The column names must all be strings and not contain spaces, special symbols, etc."),
+                                                        fileInput("upload.ccd",
+                                                                  NULL,
+                                                                  buttonLabel = "Upload Design",
+                                                                  accept = c(".csv", ".tsv")),
+                                                        ## fileInput("upload.ccd.responses",
+                                                        ##           NULL,
+                                                        ##           buttonLabel = "Upload Responses",
+                                                        ##           accept = c(".csv", ".tsv"),
+                                                        ##           placeholder = "Results w/ 'Run'")
+                                                        uiOutput("upload.ccd.responses"),
+                                                        ),
+                                                    mainPanel(
+                                                        tabsetPanel(
+                                                            tabPanel("Uploaded Design",
+                                                                     DTOutput("ccd.df.upload")),
+                                                            tabPanel("Uploaded Responses",
+                                                                     checkboxInput("trans.ccd",
+                                                                                   "Apply Transformation?"),
+                                                                     helpText("The applied transformation can be selected under the 'Analysis' tab."),
+                                                                     DTOutput("ccd.response.upload")),
+                                                            tabPanel("Joined Data",
+                                                                     checkboxInput("agg.ccd",
+                                                                                   "Aggregate Data?"),
+                                                                     DTOutput("ccd.analysis"))
+                                                        )
+                                                    )
+                                                )
+                                                ),
+                                       navbarMenu("Analysis",
+                                                  tabPanel("Visualization",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ccd.y",
+                                                                               "Select Response for Y-axis",
+                                                                               choices = c("Import Response Data for Choices"),
+                                                                               multiple = FALSE),
+                                                                   selectInput("ccd.x",
+                                                                               "Select Design Term for X-axis",
+                                                                               choices = c("Import Design Data for Choices"),
+                                                                               multiple = FALSE),
+                                                                   selectInput("ccd.color",
+                                                                               "Select Design Term for Point Color",
+                                                                               choices = c("Import Design Data for Choices"),
+                                                                               multiple = FALSE),
+                                                                   checkboxInput("ccd.facet",
+                                                                                 "Add Facetting to Visualization?",
+                                                                                 value = FALSE),
+                                                                   uiOutput("ccd.facet.var")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("ccd.vis")
+                                                               )
+                                                           )),
+                                                  tabPanel("Regression Summary",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter Terms for Regression Summary"),
+                                                                   selectInput("ccd.mod.response.var",
+                                                                               "Select Response Variable",
+                                                                               multiple = FALSE,
+                                                                               choices = c("Import Response Data")),
+                                                                   selectInput("ccd.mod.first",
+                                                                               "Select First-Order Effects in Model",
+                                                                               multiple = TRUE,
+                                                                               choices = c("Import Design Data")),
+                                                                   selectInput("ccd.mod.second",
+                                                                               "Select Second-Order Effects in Model",
+                                                                               multiple = TRUE,
+                                                                               choices = c("Import Design Data")),
+                                                                   selectInput("ccd.mod.interactions",
+                                                                               "Select Interactions in Model",
+                                                                               multiple = TRUE,
+                                                                               choices = c("Import Design Data")),
+                                                                   actionButton("ccd.refactor",
+                                                                                "Refactor Regression Summary"),
+                                                                   helpText("Be sure to refactor the regression summary if any changes are made to the underlying data.")
+                                                               ),
+                                                               mainPanel(
+                                                                   uiOutput("ccd.reg.title"),
+                                                                   DTOutput("ccd.lm.mod"),
+                                                                   DTOutput("ccd.lm.glance")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Stepwise Regression Tool",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ccd.mod.response.var.step",
+                                                                               "Select Response Variable",
+                                                                               multiple = FALSE,
+                                                                               choices = c("Import Response Data")),
+                                                                   selectInput("ccd.mod.step.dir",
+                                                                               "Select Stepwise Regression Direction",
+                                                                               multiple = FALSE,
+                                                                               choices = c("forward", "backward", "both"))
+                                                               ),
+                                                               mainPanel(
+                                                                   tableOutput("ccd.step.anova")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Diagnostic Plots",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ccd.diagnostic.select",
+                                                                               "Select Diagnostic Plot",
+                                                                               choices = c("Residuals vs. Fitted",
+                                                                                           "Residual Q-Q",
+                                                                                           "Scale-Location",
+                                                                                           "Cook's Distance",
+                                                                                           "Residuals vs. Leverage",
+                                                                                           "Cook's disr vs. Lev./(1-Lev.)"),
+                                                                               selected = "Residuals vs. Fitted")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("ccd.diagnostic.plot"),
+                                                                   helpText("Requires user to build a regression model prior to use.")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Data Transformation",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ccd.transformation.qq",
+                                                                               "Transformation Q-Q Plot",
+                                                                               choices = c("No Transformation",
+                                                                                           "y^(-3)",
+                                                                                           "y^(-2)",
+                                                                                           "y^(-1)",
+                                                                                           "1/sqrt(y)",
+                                                                                           "log(y)",
+                                                                                           "sqrt(y)",
+                                                                                           "y^2",
+                                                                                           "y^3"),
+                                                                               selected = "No Transformation")),
+                                                               mainPanel(
+                                                                   plotOutput("ccd.box.cox"),
+                                                                   helpText("Requires user to build a regression model prior to use.")))), 
+                                                  tabPanel("Predictions",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   sliderInput("ccd.pred.reso",
+                                                                               label = "Choose Resolution for Prediction Table",
+                                                                               min = 1,
+                                                                               max = 50,
+                                                                               value = 20),
+                                                                   selectInput("ccd.pred.opt",
+                                                                               label = "Preferred Optimization",
+                                                                               choices = c("Minimize", "Maximize"),
+                                                                               selected = "Maxmize"),
+                                                                   actionButton("ccd.pred.table.refresh",
+                                                                                "Generate / Refresh Prediction Table")
+                                                               ),
+                                                               mainPanel(
+                                                                   DTOutput("ccd.pred.table")
+                                                               )
+                                                           )
+                                                           )
+                                                  )
+                                   )
+                                   ),
+###########################
+                          ## Single Factor Randomized Design
+##################################3
+                          tabPanel("Single Factor Randomized Design",
+                                   tags$h1("Single Factor Randomized Design"),
+                                   tabsetPanel(
+                                       navbarMenu("Create Single Factor Design",
+                                                  tabPanel("Create Design",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter the Factors in your Single Factor Design."),
+                                                                   textInput("sfd.factor.input",
+                                                                             "Enter Factor Name",
+                                                                             placeholder = "Factor Name Cannot be a Number"),
+                                                                   numericInput("sfd.min",
+                                                                                "Minimum Level",
+                                                                                value = 0),
+                                                                   numericInput("sfd.max",
+                                                                                "Maximum Level",
+                                                                                value = 1),
+                                                                   sliderInput(
+                                                                       "sfd.levels",
+                                                                       "Number of Levels in Design",
+                                                                       min = 3,
+                                                                       max = 15,
+                                                                       value = 5,
+                                                                       step = 2
+                                                                   ),
+                                                                   actionButton("sfd.create",
+                                                                                "Create Single Factor Design"),
+                                                                   uiOutput("sfd.tune"),                                                                                  
+                                                                   ),
+                                                               mainPanel(
+                                                                   helpText("Single Factor Design Density"),
+                                                                   plotOutput("sfd.design.density")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Raw Data / Download",
+                                                           tags$h2("Design Representation - Raw Data"),
+                                                           tableOutput("sfd.table"),
+                                                           downloadButton("download.sfd")
+                                                           )
+                                                  ),
+                                       tabPanel("Import / View Data",
+                                                sidebarLayout(
+                                                    sidebarPanel(
+                                                        helpText('Upload design with "Run" column and design components.'),
+                                                        helpText("Once design is uploaded, add response data with 'Run' column and responses."),
+                                                        helpText("The column names must all be strings and not contain spaces, special symbols, etc."),
+                                                        fileInput("upload.sfd",
+                                                                  NULL,
+                                                                  buttonLabel = "Upload Design",
+                                                                  accept = c(".csv", ".tsv")),
+                                                        ## fileInput("upload.ccd.responses",
+                                                        ##           NULL,
+                                                        ##           buttonLabel = "Upload Responses",
+                                                        ##           accept = c(".csv", ".tsv"),
+                                                        ##           placeholder = "Results w/ 'Run'")
+                                                        uiOutput("upload.sfd.responses"),
+                                                        ),
+                                                    mainPanel(
+                                                        tabsetPanel(
+                                                            tabPanel("Uploaded Design",
+                                                                     DTOutput("sfd.df.upload")),
+                                                            tabPanel("Uploaded Responses",
+                                                                     checkboxInput("trans.sfd",
+                                                                                   "Apply Transformation?"),
+                                                                     helpText("The applied transformation can be selected under the 'Analysis' tab."),
+                                                                     DTOutput("sfd.response.upload"),
+                                                                     "Uploaded Response Data with a 'Run' Column"),
+                                                            tabPanel("Joined Data",
+                                                                     checkboxInput("agg.sfd",
+                                                                                   "Aggregate Data?"),
+                                                                     DTOutput("sfd.analysis"))
+                                                        )
+                                                    )
+                                                )
+                                                ),
+                                       navbarMenu("Analysis",
+                                                  tabPanel("Visualization",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("sfd.y",
+                                                                               "Select Response for Y-axis",
+                                                                               choices = c("Import Response Data for Choices"),
+                                                                               multiple = FALSE),
+                                                                   selectInput("sfd.x",
+                                                                               "Select Design Term for X-axis",
+                                                                               choices = c("Import Design Data for Choices"),
+                                                                               multiple = FALSE),
+                                                                   ),
+                                                               mainPanel(
+                                                                   tags$h4("Visualization for Response Data from Single Factor Design"),
+                                                                   plotOutput("sfd.vis")
+                                                               )
+                                                           )),
+                                                  tabPanel("Regression Summary",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter Terms for Regression Summary"),
+                                                                   selectInput("sfd.mod.response.var",
+                                                                               "Select Response Variable",
+                                                                               multiple = FALSE,
+                                                                               choices = c("Import Response Data")),
+                                                                   checkboxInput("sfd.quad.term",
+                                                                                 "Include Quadratic Term in Design?"),
+                                                                   ),
+                                                               mainPanel(
+                                                                   uiOutput("sfd.reg.title"),
+                                                                   tags$h4("Regression Summary for Single Factor Design"),
+                                                                   verbatimTextOutput("sfd.model.summary")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Diagnostic Plots",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("sfd.diagnostic.select",
+                                                                               "Select Diagnostic Plot",
+                                                                               choices = c("Residuals vs. Fitted",
+                                                                                           "Residual Q-Q",
+                                                                                           "Scale-Location",
+                                                                                           "Cook's Distance",
+                                                                                           "Residuals vs. Leverage",
+                                                                                           "Cook's disr vs. Lev./(1-Lev.)"),
+                                                                               selected = "Residuals vs. Fitted")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("sfd.diagnostic.plot"),
+                                                                   helpText("Requires user to build a regression model prior to use.")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Data Transformation",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("sfd.transformation.qq",
+                                                                               "Transformation Q-Q Plot",
+                                                                               choices = c("No Transformation",
+                                                                                           "y^(-3)",
+                                                                                           "y^(-2)",
+                                                                                           "y^(-1)",
+                                                                                           "1/sqrt(y)",
+                                                                                           "log(y)",
+                                                                                           "sqrt(y)",
+                                                                                           "y^2",
+                                                                                           "y^3"),
+                                                                               selected = "No Transformation")),
+                                                               mainPanel(
+                                                                   plotOutput("sfd.box.cox"),
+                                                                   helpText("Requires user to build a regression model prior to use.")))), 
+                                                  tabPanel("Predictions",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   sliderInput("sfd.pred.reso",
+                                                                               label = "Choose Resolution for Prediction Table",
+                                                                               min = 1,
+                                                                               max = 50,
+                                                                               value = 20),
+                                                                   selectInput("sfd.pred.opt",
+                                                                               label = "Preferred Optimization",
+                                                                               choices = c("Minimize", "Maximize"),
+                                                                               selected = "Maxmize"),
+                                                                   actionButton("sfd.pred.table.refresh",
+                                                                                "Generate / Refresh Prediction Table")
+                                                               ),
+                                                               mainPanel(
+                                                                   DTOutput("sfd.pred.table")
+                                                               )
+                                                           )
+                                                           )
+                                                  )
+                                   )),
+#################################                                
+############### Mixture Design Ui
+################################                                 
+                          tabPanel("Mixture Design",
+                                   tags$h1("Mixture Design"),
+                                   tabsetPanel(
+                                       navbarMenu("Create Mixture Design",
+                                                  tabPanel("Create Design",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter the Components in your Mixture Design"),
+                                                                   helpText("Mixture components must be one word string and not contain special symbols."),
+                                                                   textInput("mix.comp.input",
+                                                                             "Enter Component Name",
+                                                                             placeholder = "Component Name Cannot be a Number or Contain Symbols"),
+                                                                   sliderInput("mix.comp.range",
+                                                                               "Enter Component Range",
+                                                                               min = 0, max = 1,
+                                                                               value = c(0,1)),
+                                                                   actionButton("mix.comp.enter",
+                                                                                "Enter Mixture Component"),
+                                                                   actionButton("mix.comp.delete",
+                                                                                "Delete Mixture Component")
+                                                               ),
+                                                               mainPanel(
+                                                                   DTOutput("mix.design.table"),
+                                                                   helpText("Mixture Design Components")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Tune Design",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   checkboxInput("mix.fillv",
+                                                                                 "Fill Mixture Space?"),
+                                                                   checkboxInput("mix.amount.var",
+                                                                                 "Add Amount/Process Variable?"),
+                                                                   uiOutput("mix.amount.ui")
+                                                               ),
+                                                               mainPanel(
+                                                                   tags$h2("2D Design Representation - Mixture Design"),
+                                                                   plotOutput("mix.comp.plot"),
+                                                                   textOutput("mix.design.comp.num")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Raw Data / Download",
+                                                           tags$h2("Randomized Mixture Design"),
+                                                           tableOutput(outputId = "mix.comp.table"),
+                                                           downloadButton("download.mix")
+                                                           )
+                                                  ),
+                                       tabPanel("Import / View Data",
+                                                sidebarLayout(
+                                                    sidebarPanel(
+                                                        helpText("Upload design with 'Run' column and design components only."),
+                                                        helpText("Once design is uploaded, add response data with 'Run' column and responses"),
+                                                        helpText("The column names must all be strings and not contain spaces, special symbols, etc."),
+                                                        fileInput("upload.mix",
+                                                                  NULL,
+                                                                  buttonLabel = "Upload Design",
+                                                                  accept = c(".csv", ".tsv")),
+                                                        uiOutput("upload.mix.responses"),
+                                                        ),
+                                                    mainPanel(
+                                                        tabsetPanel(
+                                                            tabPanel("Uploaded Design",
+                                                                     DTOutput("mix.df.upload")),
+                                                            tabPanel("Uploaded Responses",
+                                                                     checkboxInput("trans.mix",
+                                                                                   "Apply Transformation?"),
+                                                                     helpText("The applied transformation can be selected under the 'Analysis' tab."),
+                                                                     DTOutput("mix.response.upload"),
+                                                                     "Uploaded Response Data with a 'Run' Column"),
+                                                            tabPanel("Joined Data",
+                                                                     checkboxInput("agg.mix",
+                                                                                   "Aggregate Data?"),
+                                                                     DTOutput("mix.analysis"))
+                                                        )
+                                                    )
+                                                )
+                                                ),
+                                       navbarMenu("Analysis",
+                                                  tabPanel("Regression Model",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter Terms for Mixture Model"),
+                                                                   uiOutput("mix.model.terms")
+                                                               ),
+                                                               mainPanel(
+                                                                   tags$h3("Mixture Model Summary"),
+                                                                   helpText("Enter model terms on the left to see summary statistics."),
+                                                                   verbatimTextOutput("mix.model.summary")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Visualization",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   uiOutput("mix.graph.comps"),
+                                                                   uiOutput("mix.graph.slider")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("mix.contour.plot")
+                                                               )
+                                                           )),
+                                                  tabPanel("Diagnostic Plots",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("mix.diagnostic.select",
+                                                                               "Select Diagnostic Plot",
+                                                                               choices = c("Residuals vs. Fitted",
+                                                                                           "Residual Q-Q",
+                                                                                           "Scale-Location",
+                                                                                           "Cook's Distance",
+                                                                                           "Residuals vs. Leverage",
+                                                                                           "Cook's disr vs. Lev./(1-Lev.)"),
+                                                                               selected = "Residuals vs. Fitted")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("mix.diagnostic.plot"),
+                                                                   helpText("Requires user to build a regression model prior to use.")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Data Transformation",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("mix.transformation.qq",
+                                                                               "Transformation Q-Q Plot",
+                                                                               choices = c("No Transformation",
+                                                                                           "y^(-3)",
+                                                                                           "y^(-2)",
+                                                                                           "y^(-1)",
+                                                                                           "1/sqrt(y)",
+                                                                                           "log(y)",
+                                                                                           "sqrt(y)",
+                                                                                           "y^2",
+                                                                                           "y^3"),
+                                                                               selected = "No Transformation")
+                                                               ),
+                                                                   mainPanel(
+                                                                       plotOutput("mix.box.cox"),
+                                                                       helpText("Requires user to build a regression model prior to use.")
+                                                                   ))),
+                                                  tabPanel("Predictions",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   sliderInput("mix.pred.reso",
+                                                                               label = "Choose Resolution for Prediction Table",
+                                                                               min = 1,
+                                                                               max = 50,
+                                                                               value = 20),
+                                                                   selectInput("mix.pred.opt",
+                                                                               label = "Preferred Optimization",
+                                                                               choices = c("Minimize", "Maximize"),
+                                                                               selected = "Maxmize")
+                                                                   ## actionButton("mix.pred.table.refresh",
+                                                                   ##              "Generate / Refresh Prediction Table")
+                                                               ),
+                                                               mainPanel(
+                                                                   DTOutput("mix.pred.table")
+                                                               )
+                                                           )
+                                                           )
+                                                  ))),
+                          ),
+############################
+####### Screening
+################
+               navbarMenu("Screening",
+                          tabPanel("Fractional/Full Factorial Design",
+                                   tags$h1("Fractional/Full Factorial Design"),
+                                   tabsetPanel(
+                                       navbarMenu("Create Factorial Design",
+                                                  tabPanel("Create Design",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter the Factors in your Factorial Design"),
+                                                                   textInput("ffd.factor.input",
+                                                                             "Enter Factor Name",
+                                                                             placeholder = "Factor Name Cannot be a Number"),
+                                                                   textInput("ffd.low.level",
+                                                                             "Enter Lower Range for Factor",
+                                                                             value = NULL),
+                                                                   textInput("ffd.high.level",
+                                                                             "Enter Upper Range for Factor",
+                                                                             value = NULL),
+                                                                   actionButton("ffd.term.enter",
+                                                                                "Enter Design Component"),
+                                                                   actionButton("ffd.term.delete",
+                                                                                "Delete Entry")
+                                                               ),
+                                                               mainPanel(
+                                                                   DTOutput("ffd.design.table"),
+                                                                   helpText("Fractional Factorial Design Table"),
+                                                                   helpText("How the Number of Runs and Factors Relate to Design Resolution."),
+                                                                   img(src = "img.png", align = "left")
+                                                               )
+                                                           )
+                                                           ),
+                                                  ## tabPanel("Resolution Table for Fractional Factorial Design",
+                                                  ##          helpText("How the Number of Runs and Factors Relate to Design Resolution."),
+                                                  ##          img(src = "img.png", align = "left")
+                                                  ##          ),
+                                                  tabPanel("Design Information",
+                                                           sidebarPanel(
+                                                               selectInput("ffd.run.number",
+                                                                           "Select the Number of Runs in Design",
+                                                                           choices = c(4, 8, 16, 32, 64, 128),
+                                                                           selected = 16),
+                                                               checkboxInput("ffd.add.center",
+                                                                             "If all factors are numeric, add center points?"),
+                                                               uiOutput("ffd.center.point")
+                                                           ),
+                                                           mainPanel(
+                                                               helpText("Summary for Fractional/Full Factorial Design"),
+                                                               verbatimTextOutput("ffd.summary")
+                                                           ),
+                                                           ),
+                                                  tabPanel("Raw Data / Download",
+                                                           tableOutput("output.table.ffd"),
+                                                           downloadButton("download.ffd")
+                                                           )
+                                                  ),
+                                       tabPanel("Import / View Data",
+                                                sidebarLayout(
+                                                    sidebarPanel(
+                                                        helpText("Upload design with 'Run' column and design components only and design levels file."),
+                                                        fileInput("upload.ffd",
+                                                                  NULL,
+                                                                  buttonLabel = "Upload Design Table",
+                                                                  accept = c(".csv", ".tsv")),
+                                                        fileInput("upload.ffd.level.table", 
+                                                                  NULL,
+                                                                  buttonLabel = "Upload Design Levels",
+                                                                  accept = c(".csv", ".tsv")),
+                                                        helpText("Once design table and levels are uploaded, add response data with 'Run' column and responses."),
+                                                        helpText("The Response table must have the same number of rows as the design table."),
+                                                        ## fileInput("upload.ccd.responses",
+                                                        ##           NULL,
+                                                        ##           buttonLabel = "Upload Responses",
+                                                        ##           accept = c(".csv", ".tsv"),
+                                                        ##           placeholder = "Results w/ 'Run'")
+                                                        uiOutput("upload.ffd.responses"),
+                                                        ),
+                                                    mainPanel(
+                                                        tabsetPanel(
+                                                            tabPanel("Uploaded Design Table",
+                                                                     tableOutput("ffd.file.upload"),
+                                                                     "Uploaded Design with a 'Run' Column"),
+                                                            tabPanel("Uploaded Design Levels",
+                                                                     tableOutput("ffd.level.table.df"),
+                                                                     "Design Factors and their Levels"),
+                                                            tabPanel("Uploaded Design",
+                                                                     verbatimTextOutput("ffd.design.upload"),
+                                                                     "Summary of Reconstructed Design"),
+                                                            tabPanel("Uploaded Responses",
+                                                                     helpText("The applied transformation can be selected under the 'Analysis' tab."),
+                                                                     DTOutput("ffd.response.upload")),
+                                                            tabPanel("Add Response to Design -- Required",
+                                                                     checkboxInput("trans.ffd",
+                                                                                   "Apply Transformation?"),
+                                                                     uiOutput("ffd.response.factor"),
+                                                                     DTOutput("ffd.analysis"))
+                                                        )
+                                                    )
+                                                )
+                                                ),
+                                       navbarMenu("Analysis",
+                                                  tabPanel("Determine Which Factors are Influential",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ffd.half.norm.term",
+                                                                               "Select Effect",
+                                                                               choices = c("Import Response Data")),
+                                                                   numericInput("ffd.half.norm.labels",
+                                                                                "Alpha Value for Half Normal Plot",
+                                                                                value = 0.05,
+                                                                                step = 0.01,
+                                                                                min = 0, max = 1)
+                                                               ),
+                                                               mainPanel(
+                                                                   tabsetPanel(
+                                                                       tabPanel("Half-Normal Plot",
+                                                                                plotOutput("half.norm.ffd"),
+                                                                       helpText("If interactions appear to be important on the half-normal plot, refer to the alias structure when constructing the regression model.  While not always true, it is more likely to observe interactions that include the relevant main effects.")),
+                                                                       tabPanel("Pareto Plot",
+                                                                                plotOutput("pareto.plot.ffd")))))
+                                                           ),
+                                                  tabPanel("Main Effects",
+                                                           plotOutput("me.plot.ffd")),
+                                                  tabPanel("Interactions",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   uiOutput("select.ia.factors")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("ia.plot.ffd")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Regression Summary",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   helpText("Enter Terms for Regression Summary"),
+                                                                   selectInput("ffd.mod.response.var",
+                                                                               "Response Variable",
+                                                                               choices = c("Import Response Data")),
+                                                                   selectInput("ffd.mod.first",
+                                                                               "Select First-Order Effects in Model",
+                                                                               multiple = TRUE,
+                                                                               choices = c("Import Design Data")),
+                                                                   selectInput("ffd.mod.interactions",
+                                                                               "Select Interactions in Model",
+                                                                               multiple = TRUE,
+                                                                               choices = c("Import Design Data")),
+                                                                   actionButton("ffd.refactor",
+                                                                                "Refactor Regression Summary"),
+                                                                   helpText("Be sure to refactor the regression summary if any changes are made to the underlying data.")
+                                                               ),
+                                                               mainPanel(
+                                                                   uiOutput("ffd.reg.title"),
+                                                                   DTOutput("ffd.lm.mod"),
+                                                                   DTOutput("ffd.lm.glance")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Diagnostic Plots",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ffd.diagnostic.select",
+                                                                               "Select Diagnostic Plot",
+                                                                               choices = c("Residuals vs. Fitted",
+                                                                                           "Residual Q-Q",
+                                                                                           "Scale-Location",
+                                                                                           "Cook's Distance",
+                                                                                           "Residuals vs. Leverage",
+                                                                                           "Cook's disr vs. Lev./(1-Lev.)"),
+                                                                               selected = "Residuals vs. Fitted")
+                                                               ),
+                                                               mainPanel(
+                                                                   plotOutput("ffd.diagnostic.plot"),
+                                                                   helpText("Requires user to build a regression model prior to use.")
+                                                               )
+                                                           )
+                                                           ),
+                                                  tabPanel("Transformations",
+                                                           sidebarLayout(
+                                                               sidebarPanel(
+                                                                   selectInput("ffd.transformation.qq",
+                                                                               "Transformation Q-Q Plot",
+                                                                               choices = c("No Transformation",
+                                                                                           "y^(-3)",
+                                                                                           "y^(-2)",
+                                                                                           "y^(-1)",
+                                                                                           "1/sqrt(y)",
+                                                                                           "log(y)",
+                                                                                           "sqrt(y)",
+                                                                                           "y^2",
+                                                                                           "y^3"),
+                                                                               selected = "No Transformation")),
+                                                               mainPanel(
+                                                                   plotOutput("ffd.box.cox"),
+                                                                   helpText("Requires user to build a regression model prior to use.")))),
+                                                  )
+                                   ))
+                          ),
+####################### Instructions #############################               
+               tabPanel("Help",
+                        tags$div(
+                                 tags$h3("Application Use Examples"),
+                                 tags$br(),
+                                 tags$a(href = "CCD Help.zip", "Download Central Composite Design Help", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$a(href = "SFD Help.zip", "Download Single Factor Design Help", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$a(href = "Mixture Help.zip", "Download Mixture-Process Design Help", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$a(href = "Fractional Factorial Design Help.zip", "Download Fractional Factorial Design Help", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$h3("Publications from Package Authors"),
+                                 tags$br(),
+                                 tags$a(href = "Fractional Factorial Design.pdf", "R Package FrF2 for Creating and Analyzing Fractional Factorial 2-Level Designs", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$a(href = "Mixture Design.pdf", "Mixture Experiments in R using mixexp", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$a(href = "Response Surface Methodology.pdf", "Response-Surface Methods in R using rsm", download = NA, target = "_blank"),
+                                 tags$br(),
+                                 tags$br(),
+                                 tags$br(),
+                                 tags$h5("For any questions or concerns, please email brett.gytri@tissuegrown.com.  Thanks for using the application!")
+                                 )
+                        )
+               ),
+    theme = shinytheme("cosmo")
+)
+
+### Server Section 
+
+server <- function(input, output, session) {
+    ## Optimization
+    ## Central Composite Design
+    ## Design Table
+
+    ccd.table.1 <- data.frame(Factor.Name = NULL,
+                              Center.Point = NULL,
+                              Range = NULL)
+
+    ccd.table.1 <- reactiveVal(ccd.table.1)
+
+    observeEvent(input$ccd.term.enter, {
+
+        ## char.test <- is.character(input$ccd.factor.input)
+        
+        ## shinyFeedback::feedbackWarning("ccd.factor.input",
+        ##                                !char.test,
+        ##                                "Factor names must be strings.")
+        ## req(char.test)
+        
+        dt <- rbind(data.frame(Factor.Name = input$ccd.factor.input,
+                               Center.Point = input$ccd.center.point,
+                               Range = input$ccd.range),
+                    ccd.table.1())
+
+        ccd.table.1(dt)
+    } )
+
+    observeEvent(input$ccd.term.delete, {
+
+        dt <- ccd.table.1()
+        print(nrow(dt))
+        if(!is.null(input$ccd.design.table_rows_selected)) {
+            dt <- dt[-as.numeric(input$ccd.design.table_rows_selected),]
+        }
+        ccd.table.1(dt)
+        
+    })
+    
+
+    output$ccd.design.table <- renderDT({
+        datatable(ccd.table.1(), selection = "single", options = list(dom = 't'))
+    })
+
+    
+    
+
+    ## Update the UI Element
+
+    ccd.table <- reactive({
+
+        req(ccd.table.1())
+
+        if(nrow(ccd.table.1()) == 2) {
+
+            ccd(nrow(ccd.table.1()),
+                n0 = input$ccd.n0s / 2,
+                oneblock = TRUE,
+                alpha = input$ccd.shape,
+                inscribed = TRUE,
+                coding = list(
+                    as.formula(paste0("x1 ~ ((",
+                                      ccd.table.1()$Factor.Name[1],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[1],
+                                      ") / ",
+                                      ccd.table.1()$Range[1],
+                                      ")")),
+                    as.formula(paste0("x2 ~ ((",
+                                      ccd.table.1()$Factor.Name[2],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[2],
+                                      ") / ",
+                                      ccd.table.1()$Range[2],
+                                      ")"))
+                    
+                )) %>%
+                decode.data() %>%
+                rename(Run = run.order, STD = std.order) %>%
+                select(-STD)
+            
+        } else if(nrow(ccd.table.1()) == 3) {
+
+            ccd(nrow(ccd.table.1()),
+                n0 = input$ccd.n0s / 2,
+                oneblock = TRUE,
+                alpha = input$ccd.shape,
+                inscribed = TRUE,
+                coding = list(
+                    as.formula(paste0("x1 ~ ((",
+                                      ccd.table.1()$Factor.Name[1],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[1],
+                                      ") / ",
+                                      ccd.table.1()$Range[1],
+                                      ")")),
+                    as.formula(paste0("x2 ~ ((",
+                                      ccd.table.1()$Factor.Name[2],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[2],
+                                      ") / ",
+                                      ccd.table.1()$Range[2],
+                                      ")")),
+                    as.formula(paste0("x3 ~ ((",
+                                      ccd.table.1()$Factor.Name[3],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[3],
+                                      ") / ",
+                                      ccd.table.1()$Range[3],
+                                      ")"))
+                    
+                )) %>%
+                decode.data() %>%
+                rename(Run = run.order, STD = std.order) %>%
+                select(-STD)
+            
+        } else if(nrow(ccd.table.1()) == 4) {
+
+            ccd(nrow(ccd.table.1()),
+                n0 = input$ccd.n0s / 2,
+                oneblock = TRUE,
+                alpha = input$ccd.shape,
+                inscribed = TRUE,
+                coding = list(
+                    as.formula(paste0("x1 ~ ((",
+                                      ccd.table.1()$Factor.Name[1],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[1],
+                                      ") / ",
+                                      ccd.table.1()$Range[1],
+                                      ")")),
+                    as.formula(paste0("x2 ~ ((",
+                                      ccd.table.1()$Factor.Name[2],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[2],
+                                      ") / ",
+                                      ccd.table.1()$Range[2],
+                                      ")")),
+                    as.formula(paste0("x3 ~ ((",
+                                      ccd.table.1()$Factor.Name[3],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[3],
+                                      ") / ",
+                                      ccd.table.1()$Range[3],
+                                      ")")),
+                    as.formula(paste0("x4 ~ ((",
+                                      ccd.table.1()$Factor.Name[4],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[4],
+                                      ") / ",
+                                      ccd.table.1()$Range[4],
+                                      ")"))
+                    
+                )) %>%
+                decode.data() %>%
+                rename(Run = run.order, STD = std.order) %>%
+                select(-STD)
+            
+        } else if(nrow(ccd.table.1()) == 5) {
+
+            ccd(nrow(ccd.table.1()),
+                n0 = input$ccd.n0s / 2,
+                oneblock = TRUE,
+                alpha = input$ccd.shape,
+                inscribed = TRUE,
+                coding = list(
+                    as.formula(paste0("x1 ~ ((",
+                                      ccd.table.1()$Factor.Name[1],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[1],
+                                      ") / ",
+                                      ccd.table.1()$Range[1],
+                                      ")")),
+                    as.formula(paste0("x2 ~ ((",
+                                      ccd.table.1()$Factor.Name[2],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[2],
+                                      ") / ",
+                                      ccd.table.1()$Range[2],
+                                      ")")),
+                    as.formula(paste0("x3 ~ ((",
+                                      ccd.table.1()$Factor.Name[3],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[3],
+                                      ") / ",
+                                      ccd.table.1()$Range[3],
+                                      ")")),
+                    as.formula(paste0("x4 ~ ((",
+                                      ccd.table.1()$Factor.Name[4],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[4],
+                                      ") / ",
+                                      ccd.table.1()$Range[4],
+                                      ")")),
+                    as.formula(paste0("x5 ~ ((",
+                                      ccd.table.1()$Factor.Name[5],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[5],
+                                      ") / ",
+                                      ccd.table.1()$Range[5],
+                                      ")"))
+                    
+                )) %>%
+                decode.data() %>%
+                rename(Run = run.order, STD = std.order) %>%
+                select(-STD)
+            
+        } else if(nrow(ccd.table.1()) == 6) {
+
+            ccd(nrow(ccd.table.1()),
+                n0 = input$ccd.n0s / 2,
+                oneblock = TRUE,
+                alpha = input$ccd.shape,
+                inscribed = TRUE,
+                coding = list(
+                    as.formula(paste0("x1 ~ ((",
+                                      ccd.table.1()$Factor.Name[1],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[1],
+                                      ") / ",
+                                      ccd.table.1()$Range[1],
+                                      ")")),
+                    as.formula(paste0("x2 ~ ((",
+                                      ccd.table.1()$Factor.Name[2],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[2],
+                                      ") / ",
+                                      ccd.table.1()$Range[2],
+                                      ")")),
+                    as.formula(paste0("x3 ~ ((",
+                                      ccd.table.1()$Factor.Name[3],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[3],
+                                      ") / ",
+                                      ccd.table.1()$Range[3],
+                                      ")")),
+                    as.formula(paste0("x4 ~ ((",
+                                      ccd.table.1()$Factor.Name[4],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[4],
+                                      ") / ",
+                                      ccd.table.1()$Range[4],
+                                      ")")),
+                    as.formula(paste0("x5 ~ ((",
+                                      ccd.table.1()$Factor.Name[5],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[5],
+                                      ") / ",
+                                      ccd.table.1()$Range[5],
+                                      ")")),
+                    as.formula(paste0("x6 ~ ((",
+                                      ccd.table.1()$Factor.Name[6],
+                                      " - ",
+                                      ccd.table.1()$Center.Point[6],
+                                      ") / ",
+                                      ccd.table.1()$Range[6],
+                                      ")"))
+                    
+                )) %>%
+                decode.data() %>%
+                rename(Run = run.order, STD = std.order) %>%
+                select(-STD)
+            
+        } else {
+            validate("Please Create a Design with 2 to 5 Factors")
+        }
+        
+        
+    })
+    
+    output$ccd.table <- renderTable({
+        ccd.table()
+    })
+    
+    ## Visualization Page
+
+    output$ccd.design.plot <- renderPlot({
+        
+        if(nrow(ccd.table.1()) == 2 ) {
+
+            ccd.table() %>%
+                ggplot(aes_string(y = names(ccd.table())[2], x = names(ccd.table())[3])) +
+                geom_jitter(width = 0.01, alpha = 0.7, size = 7) +
+                labs(caption = paste0(input$ccd.fs, " Factors in Design.")) +
+                theme(axis.text.x = element_text(size = 20),
+                      axis.text.y = element_text(size = 20),
+                      plot.caption = element_text(size = 16),
+                      axis.title.x = element_text(size = 22),
+                      axis.title.y = element_text(size = 22))
+            
+        } else if(nrow(ccd.table.1()) > 2) {
+
+            ccd.table() %>%
+                ggplot(aes_string(y = names(ccd.table())[2],
+                                  x = names(ccd.table())[3],
+                                  color = names(ccd.table())[4])) +
+                geom_jitter(width = 0.01, alpha = 0.7, size = 7) +
+                labs(caption = paste0(input$ccd.fs, " Factors in Design.")) +
+                theme(axis.text.x =  element_text(size = 20),
+                      axis.text.y = element_text(size = 20),
+                      plot.caption = element_text(size = 16),
+                      axis.title.x = element_text(size = 22),
+                      axis.title.y = element_text(size = 22))
+            
+        } else {
+
+
+        }
+        
+        
+        
+    })
+
+    ## Download
+
+    output$download.ccd <- downloadHandler(
+
+        filename = function() {
+            paste("ccd design.tsv")
+        },
+
+        content = function(file) {
+            vroom_write(ccd.table(), file)
+        }
+    )
+    
+
+    ## Upload
+
+    output$ccd.file.upload <- renderTable(input$upload.ccd)
+
+    ccd.df <- reactive({
+        req(input$upload.ccd)
+
+        ext <- tools::file_ext(input$upload.ccd$name)
+
+        upload.ccd.design <- switch(ext,
+                                    csv = vroom::vroom(input$upload.ccd$datapath,
+                                                       delim = ","),
+                                    tsv = vroom::vroom(input$upload.ccd$datapath,
+                                                       delim = "\t"),
+                                    validate("Invalid file: Please Upload a .csv or .tsv")
+                                    )
+
+        validate(
+            need("Run" %in% names(upload.ccd.design),
+                 'The design will only load if it contains a column named "Run"')
+        )
+
+        upload.ccd.design
+        
+            ## if( "Run" %in% names(upload.ccd.design)) {
+        ##     upload.ccd.design
+        ## } else {
+        ##     validate('The design needs to have column with a "Run" column')
+        ##     }
+        
+        ## shinyFeedback::feedbackWarning("upload.ccd",
+        ##                                run.in.design,
+        ##                                'The uploaded design must contain a columun named "Run".')
+        ## req(run.in.design)
+
+        ## upload.ccd.design
+
+        
+    })
+
+    output$ccd.df.upload <- renderDataTable({
+        ccd.df() %>%
+            relocate(Run)
+    })
+
+
+    output$upload.ccd.responses <- renderUI({
+
+        req(ccd.df())
+
+        fileInput("upload.ccd.responses",
+                  NULL,
+                  buttonLabel = "Upload Responses",
+                  accept = c(".csv", ".tsv"),
+                  placeholder = "Results w/ 'Run'")
+
+    })
+
+
+    ccd.responses <- reactive({
+        
+        req(input$upload.ccd.responses)
+
+        ext <- tools::file_ext(input$upload.ccd.responses$name)
+
+        res <- switch(ext,
+                      csv = vroom::vroom(input$upload.ccd.responses$datapath,
+                                         delim = ","),
+                      tsv = vroom::vroom(input$upload.ccd.responses$datapath,
+                                         delim = "\t"),
+                      validate("Invalid file: Please Upload a .csv or .tsv")
+                      )
+
+        validate(
+            need("Run" %in% names(res),
+                 'The result table must have a column named "Run".')
+            )
+        
+
+        if(input$trans.ccd) {
+
+            if(input$ccd.transformation.qq == "y^(-3)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ccd.transformation.qq == "y^(-2)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ccd.transformation.qq == "y^(-1)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-1)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ccd.transformation.qq == "1/sqrt(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- 1 / sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ccd.transformation.qq == "log(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- log(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ccd.transformation.qq == "sqrt(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+
+                
+            } else if(input$ccd.transformation.qq == "y^2") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ccd.transformation.qq == "y^3") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else {
+                
+                res
+                
+            }
+
+        } else {
+
+            res
+        }
+        
+        
+    })
+
+
+    output$ccd.response.upload <- renderDataTable({
+        ccd.responses() %>%
+            relocate(Run)
+    })
+
+    ccd.joined <- reactive({
+
+        if(input$agg.ccd) {
+            
+            res <- ccd.responses() %>%
+                group_by(Run) %>%
+                summarize_all("mean", na.rm = TRUE)
+            
+        } else {
+            res <- ccd.responses()
+        }                 
+        
+        ccd.df() %>%
+            left_join(res, by = "Run") %>%
+            relocate(Run)
+    })
+
+    output$ccd.analysis <- renderDataTable({
+        ccd.joined()
+    })
+
+
+    ## Visualize CCD
+
+    observe({
+
+        resp.y.df <- ccd.responses() %>%
+            select(-Run)
+
+        resp.y <- names(resp.y.df)
+
+        updateSelectInput(session, "ccd.y",
+                          choices = resp.y,
+                          selected = head(resp.y, 1))
+        
+        resp.x.df <- ccd.df() %>%
+            select(-Run)
+
+        resp.x <- names(resp.x.df)
+
+        updateSelectInput(session, "ccd.x",
+                          choices = resp.x,
+                          selected = head(resp.x, 1))
+
+        updateSelectInput(session, "ccd.color",
+                          choices = resp.x,
+                          selected = head(resp.x, 2))
+        
+    })
+
+    output$ccd.vis <- renderPlot({
+
+        if(input$ccd.facet) {
+            
+            ccd.joined() %>%
+                ggplot(aes_string(y = input$ccd.y, x = input$ccd.x, color = input$ccd.color)) +
+                geom_jitter(size = 3, width = 0.1) +
+                facet_wrap(as.formula(paste("~", input$ccd.facet.var))) +
+                theme(axis.text.x =  element_text(size = 20),
+                      axis.text.y = element_text(size = 20),
+                      plot.caption = element_text(size = 16),
+                      axis.title.x = element_text(size = 22),
+                      axis.title.y = element_text(size = 24),
+                      title = element_text(size = 20)) +
+                labs(title = paste0("How ",
+                                    input$ccd.x,
+                                    ", ",
+                                    input$ccd.color,
+                                    " and ",
+                                    input$ccd.facet.var,
+                                    " Affect the Response ",
+                                    input$ccd.y))
+
+            
+        } else {
+            
+            ccd.joined() %>%
+                ggplot(aes_string(y = input$ccd.y, x = input$ccd.x, color = input$ccd.color)) +
+                geom_jitter(size = 3, width = 0.1) +
+                theme(axis.text.x =  element_text(size = 20),
+                      axis.text.y = element_text(size = 20),
+                      plot.caption = element_text(size = 16),
+                      axis.title.x = element_text(size = 22),
+                      axis.title.y = element_text(size = 22),
+                      title = element_text(size = 20)) +
+                labs(title = paste0("How ",
+                                    input$ccd.x,
+                                    " and ",
+                                    input$ccd.color,
+                                    " Affect the Response ",
+                                    input$ccd.y))
+        }
+        
+    })
+
+    output$ccd.facet.var <- renderUI({
+        req(input$ccd.facet)
+
+        resp.x.df <- ccd.df() %>%
+            select(-Run)
+
+        resp.x <- names(resp.x.df)
+
+        selectInput(inputId = "ccd.facet.var",
+                    label = "Facetting Variable",
+                    choices = resp.x)
+    })
+
+    ## Regression Summary CCD
+
+    ## Set Up the Regression Model
+
+    observe({
+        req(ccd.responses())
+
+        table <- ccd.responses() %>%
+            select(-Run)
+
+        names <- names(table)
+        
+        updateSelectInput(session,
+                          "ccd.mod.response.var",
+                          choices = names)
+
+        updateSelectInput(session,
+                          "ccd.mod.response.var.step",
+                          choices = names)
+        
+    })
+
+    observe({
+        req(ccd.df())
+
+        if("STD" %in% names(ccd.df())) {
+
+            table <- ccd.df() %>%
+                select(-Run, -STD)
+            
+        } else {
+            
+            table <- ccd.df() %>%
+                select(-Run)
+            
+        }
+
+        names <- names(table)
+
+        updateSelectInput(session,
+                          "ccd.mod.response.var",
+                          choices = names,
+                          selected = names[1])
+
+        updateSelectInput(session,
+                          "ccd.mod.first",
+                          choices = names)
+
+        updateSelectInput(session,
+                          "ccd.mod.second",
+                          choices = names)
+        
+    })
+    
+    mod.ccd.tidy <- reactive({
+
+        req(ccd.joined())
+
+        if("STD" %in% names(ccd.df())) {
+
+            table <- ccd.df() %>%
+                select(-Run, -STD)
+            
+        } else {
+            
+            table <- ccd.df() %>%
+                select(-Run)
+            
+        }
+        
+        design.factors <- names(table)
+
+        fac.names <- paste(design.factors, collapse = "|")
+        
+        reg.df <- ccd.joined() %>%
+            select(contains(input$ccd.mod.response.var), matches(fac.names))
+
+        mod <- lm(data = reg.df, as.formula(
+                                     paste( input$ccd.mod.response.var,
+                                           "~ (.)^2")))
+        broom::tidy(mod)
+        
+    })
+
+
+    observe({
+
+        req(mod.ccd.tidy())
+
+        interactions <- mod.ccd.tidy() %>%
+            filter(grepl(":", term))
+
+        updateSelectInput(session,
+                          "ccd.mod.interactions",
+                          choices = interactions$term)
+    })
+
+    mod.ccd.refactor <- data.frame()
+    
+    mod.ccd.refactor <- reactiveVal(mod.ccd.refactor)
+
+    mod.ccd.stats <- data.frame()
+    
+    mod.ccd.stats <- reactiveVal(mod.ccd.stats)
+
+    observeEvent(input$ccd.refactor, {
+
+        first.order.string <- vector()
+
+        for(i in 1:length(input$ccd.mod.first)) {
+
+            if(input$ccd.mod.first[i] == input$ccd.mod.first[length(input$ccd.mod.first)]) {
+                
+                string <- paste0(input$ccd.mod.first[i])
+                
+            } else {
+
+                string <- paste0(input$ccd.mod.first[i], " +")
+            }
+            
+            first.order.string <- paste(first.order.string, string)
+        }
+
+        interaction.string <- vector()
+
+        if(length(input$ccd.mod.interactions) > 0) {
+            for(i in 1:length(input$ccd.mod.interactions)) {
+
+                if(input$ccd.mod.interactions[i] == input$ccd.mod.interactions[length(input$ccd.mod.interactions)]) {
+                    
+                    string <- paste0(input$ccd.mod.interactions[i])
+                    
+                } else {
+
+                    string <- paste0(input$ccd.mod.interactions[i], " +")
+                }
+                
+                interaction.string <- paste(interaction.string, string)
+            }
+        }
+
+        second.order.string <- vector()
+
+        if(length(input$ccd.mod.second) > 0) {
+            
+            for(i in 1:length(input$ccd.mod.second)) {
+
+                if(input$ccd.mod.second[i] == input$ccd.mod.second[length(input$ccd.mod.second)]) {
+                    
+                    string <- paste0("I(", input$ccd.mod.second[i], "^2)")
+                    
+                } else {
+
+                    string <- paste0("I(", input$ccd.mod.second[i], "^2)", " +")
+                }
+                
+                second.order.string <- paste(second.order.string, string)
+            }
+        }
+
+        resp.var <<- input$ccd.mod.response.var[1]
+
+        if(length(interaction.string) > 0 &
+           length(second.order.string) > 0) {
+            
+            mod.expr.ccd <<- paste(first.order.string,
+                                   "+",
+                                   interaction.string,
+                                   "+",
+                                   second.order.string)
+            
+        } else if(length(interaction.string) > 0 &
+                  length(second.order.string) == 0) {
+
+            mod.expr.ccd <<-paste(first.order.string,
+                                  "+",
+                                  interaction.string)
+            
+        } else if(length(interaction.string) == 0 &
+                  length(second.order.string) > 0) {
+
+            mod.expr.ccd <<- paste(first.order.string,
+                                   "+",
+                                   second.order.string)
+            
+        } else {
+
+            mod.expr.ccd <<- paste(first.order.string)
+        }
+
+        mod.ccd <<- lm(data = ccd.joined(), as.formula(
+                                                paste(resp.var,
+                                                      "~",
+                                                      mod.expr.ccd)))
+        
+        
+        m.tidy <- broom::tidy(mod.ccd)
+        m.glance <- broom::glance(mod.ccd) %>%
+            select(r.squared, adj.r.squared, p.value,
+                   degrees.freedom = df.residual,
+                   f.statistic = statistic,
+                   res.std.error = sigma)
+
+        mod.ccd.refactor(m.tidy)
+        mod.ccd.stats(m.glance)
+
+        output$ccd.reg.title <- renderUI({
+
+            tags$h4(paste("Regression Summary for Response Variable -", resp.var))
+            
+        })
+
+    })
+
+
+    output$ccd.lm.mod <- renderDT({
+
+        if(nrow(mod.ccd.refactor()) < 1) {
+            
+            datatable(mod.ccd.tidy(),
+                      options = list(
+                          dom = "t"))  %>%
+                formatRound(c("estimate", "std.error", "statistic"),
+                            digits = 3) 
+            
+            
+        } else {
+            
+            datatable(mod.ccd.refactor(),
+                      options = list(
+                          dom = "t"))  %>%
+                formatRound(c("estimate", "std.error", "statistic"),
+                            digits = 3) %>%
+                formatRound(c("p.value"),
+                            digits = 5)
+            
+        }
+    })
+
+    output$ccd.lm.glance <- renderDT({
+
+        req(mod.ccd.stats())
+
+        if(nrow(mod.ccd.stats() == 1)) {
+            
+            datatable(mod.ccd.stats(),
+                      options = list(
+                          dom = "t")) %>%
+                formatRound(c("r.squared", "adj.r.squared", "f.statistic", "res.std.error"),
+                            digits = 2) %>%
+                formatRound("p.value",
+                            digits = 5)
+        }
+    })
+
+    ##  Stepwise Regression Tool
+
+    stepwise.ccd <- reactive({
+
+        factor.names <- ccd.df() %>%
+            select(-Run)
+
+        rsp.var <- input$ccd.mod.response.var.step[1]
+        
+        f.names <- colnames(factor.names)
+
+        names <- c(f.names, rsp.var)
+
+        ccd.df.use <- ccd.joined() %>%
+            select(any_of(names))
+
+        intercept.only <- lm(data = ccd.df.use, as.formula(paste(rsp.var, "~ 1")))
+
+        all <- lm(data = ccd.df.use, as.formula(paste(rsp.var, "~ .")))
+
+        stepwise.reg <- step(intercept.only, direction = input$ccd.mod.step.dir[1],
+                             scope = formula(all), trace = 0)
+
+        stepwise.reg$anova
+        
+    })
+
+    output$ccd.step.anova <- renderTable(
+        stepwise.ccd()
+    )
+
+    ## Model Diagnostics
+    
+    output$ccd.diagnostic.plot <- renderPlot({
+
+        if(input$ccd.diagnostic.select == "Residuals vs. Fitted") {
+
+            plot(mod.ccd, which = 1)
+            
+        } else if(input$ccd.diagnostic.select == "Residual Q-Q") {
+
+            plot(mod.ccd, which = 2)
+
+        } else if(input$ccd.diagnostic.select == "Scale-Location") {
+
+            plot(mod.ccd, which = 3)
+            
+        } else if(input$ccd.diagnostic.select == "Cook's Distance") {
+
+            plot(mod.ccd, which = 4)
+            
+        } else if(input$ccd.diagnostic.select == "Residuals vs. Leverage") {
+
+            plot(mod.ccd, which = 5)
+            
+        } else {
+
+            plot(mod.ccd, which = 6)
+            
+        }
+
+    })
+    
+    ## Data Transformation
+    
+    output$ccd.box.cox <- renderPlot({
+
+        if(input$trans.ccd) {
+
+            plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+            text(x = 5, y = 5, "Transformation Already Applied to Data")
+            
+        } else if(0 %in% ccd.joined()[[input$ccd.mod.response.var[1]]]) {
+
+            df <- ccd.joined() %>%
+                mutate(T.sqrt = sqrt(.data[[input$ccd.mod.response.var[1]]]),
+                       T.2 = (.data[[input$ccd.mod.response.var[1]]])^(2),
+                       T.3 = (.data[[input$ccd.mod.response.var[1]]])^(3),
+                       T.no = .data[[input$ccd.mod.response.var[1]]])
+            
+            mod.ccd.5 <- lm(data = df, as.formula(
+                                           paste("T.sqrt",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.6 <- lm(data = df, as.formula(
+                                           paste("T.2",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.7 <- lm(data = df, as.formula(
+                                           paste("T.3",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.8 <- lm(data = df, as.formula(
+                                           paste("T.no",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            
+
+            if(input$ccd.transformation.qq == "No Transformation") {
+
+                plot(mod.ccd.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+            } else if(input$ccd.transformation.qq == "y^(-3)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ccd.transformation.qq == "y^(-2)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ccd.transformation.qq == "y^(-1)") {
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ccd.transformation.qq == "1/sqrt(y)") {
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ccd.transformation.qq == "log(y)") {
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ccd.transformation.qq == "sqrt(y)") {
+
+                plot(mod.ccd.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "y^2") {
+
+                plot(mod.ccd.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "y^3") {
+
+                plot(mod.ccd.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+                
+            } 
+            
+        } else {
+            
+            df <- ccd.joined() %>%
+                mutate(T.neg.3 = (.data[[input$ccd.mod.response.var[1]]])^(-3),
+                       T.neg.2 = (.data[[input$ccd.mod.response.var[1]]])^(-2),
+                       T.neg.1 = (.data[[input$ccd.mod.response.var[1]]])^(-1),
+                       T.neg.sqrt = 1 / sqrt(.data[[input$ccd.mod.response.var[1]]]),
+                       T.log = log(.data[[input$ccd.mod.response.var[1]]]),
+                       T.sqrt = sqrt(.data[[input$ccd.mod.response.var[1]]]),
+                       T.2 = (.data[[input$ccd.mod.response.var[1]]])^(2),
+                       T.3 = (.data[[input$ccd.mod.response.var[1]]])^(3),
+                       T.no = .data[[input$ccd.mod.response.var[1]]])
+            
+
+            mod.ccd.0 <- lm(data = df, as.formula(
+                                           paste("T.neg.3",
+                                                 "~",
+                                                 mod.expr.ccd)))
+            
+            mod.ccd.1 <- lm(data = df, as.formula(
+                                           paste("T.neg.2",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.2 <- lm(data = df, as.formula(
+                                           paste("T.neg.1",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.3 <- lm(data = df, as.formula(
+                                           paste("T.neg.sqrt",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.4 <- lm(data = df, as.formula(
+                                           paste("T.log",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.5 <- lm(data = df, as.formula(
+                                           paste("T.sqrt",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.6 <- lm(data = df, as.formula(
+                                           paste("T.2",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.7 <- lm(data = df, as.formula(
+                                           paste("T.3",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            mod.ccd.8 <- lm(data = df, as.formula(
+                                           paste("T.no",
+                                                 "~",
+                                                 mod.expr.ccd)))
+
+            
+
+            if(input$ccd.transformation.qq == "No Transformation") {
+
+                plot(mod.ccd.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+                
+            } else if(input$ccd.transformation.qq == "y^(-3)") {
+
+                plot(mod.ccd.0, which = 2)
+                
+                title("Q-Q Plot for y^(-3) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "y^(-2)") {
+
+                plot(mod.ccd.1, which = 2)
+
+                title("Q-Q Plot for y^(-2) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "y^(-1)") {
+
+                plot(mod.ccd.2, which = 2)
+
+                title("Q-Q Plot for y^(-1) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "1/sqrt(y)") {
+
+                plot(mod.ccd.3, which = 2)
+
+                title("Q-Q Plot for 1/sqrt(y) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "log(y)") {
+
+                plot(mod.ccd.4, which = 2)
+
+                title("Q-Q Plot for log(y) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "sqrt(y)") {
+
+                plot(mod.ccd.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "y^2") {
+
+                plot(mod.ccd.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+                
+            } else if(input$ccd.transformation.qq == "y^3") {
+
+                plot(mod.ccd.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+                
+            } 
+        }         
+    })
+
+    ## CCD Predictions
+
+    ccd.pred.t <- reactiveVal()
+
+    ccd.pred.t(tibble(Column = "Refactor Regression Model to Enable Predictions"))
+
+    
+    observeEvent(input$ccd.pred.table.refresh, {
+        
+        des.ccd.p <- ccd.df() %>%
+            select(-Run)
+
+        resolution <- input$ccd.pred.reso
+        
+        df.ccd.p <- data.frame(Rows = 1:resolution)
+
+        names.ccd.p <- colnames(des.ccd.p)
+
+        for(i in 1:length(des.ccd.p)) {
+
+            min <- min(des.ccd.p[[i]])
+            max <- max(des.ccd.p[[i]])
+            df.j <- tibble(!!names.ccd.p[i] := seq(min, max, length.out = resolution))
+            df.ccd.p <- cbind(df.ccd.p, df.j) 
+        }
+
+        df.opt.ccd.p <- df.ccd.p %>%
+            select(-Rows)
+
+        pred.df <- expand.grid(df.opt.ccd.p) %>%
+            add_predictions(mod.ccd, var = "Predicted.Response")
+
+        if(input$trans.ccd) {
+
+            if(input$ccd.transformation.qq == "No Transformation") {
+
+                pred.df.t <- pred.df
+
+            } else if(input$ccd.transformation.qq == "y^(-3)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response^(1/3))) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+                
+                
+            } else if(input$ccd.transformation.qq == "y^(-2)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response^(1/2))) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+                
+            } else if(input$ccd.transformation.qq == "y^(-1)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response)) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } else if(input$ccd.transformation.qq == "1/sqrt(y)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response^(2))) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } else if(input$ccd.transformation.qq == "log(y)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = exp(Predicted.Response)) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+                
+            } else if(input$ccd.transformation.qq == "sqrt(y)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = Predicted.Response^(2)) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } else if(input$ccd.transformation.qq == "y^2") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = sqrt(Predicted.Response)) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+                
+            } else if(input$ccd.transformation.qq == "y^3") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = Predicted.Response^(1/3)) %>%
+                    select(any_of(names.ccd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } 
+            
+        } else {
+            
+            pred.df.t <- pred.df
+            
+        }
+        
+        
+
+        if(input$ccd.pred.opt == "Maximize") {
+            
+            options.ccd.p <- pred.df.t  %>%
+                arrange(desc(Predicted.Response))
+            
+        } else if(input$ccd.pred.opt == "Minimize") {
+
+            options.ccd.p <- pred.df.t %>%
+                arrange(Predicted.Response)
+
+        }
+
+        ccd.pred.t(options.ccd.p)
+        
+    })
+    
+    
+    output$ccd.pred.table <- renderDataTable({
+
+        ccd.pred.t()
+
+    })
+
+    ## Mixture Design
+    ## Create Mixture Design
+
+    mix.table.1 <- data.frame(Component.Name = NULL,
+                              Minimum.Level = NULL,
+                              Maximum.Level = NULL)
+
+    mix.table.1 <- reactiveVal(mix.table.1)
+
+    observeEvent(input$mix.comp.enter, {
+        
+        dt <- rbind(data.frame(Component.Name = input$mix.comp.input,
+                               Minimum.Level = input$mix.comp.range[1],
+                               Maximum.Level = input$mix.comp.range[2]),
+                    mix.table.1())
+
+        mix.table.1(dt)
+    } )
+
+    observeEvent(input$mix.comp.delete, {
+
+        dt <- mix.table.1()
+        print(nrow(dt))
+        if(!is.null(input$mix.design.table_rows_selected)) {
+            dt <- dt[-as.numeric(input$mix.design.table_rows_selected),]
+        }
+        mix.table.1(dt)
+        
+    })
+    
+
+    output$mix.design.table <- renderDT({
+        datatable(mix.table.1(), selection = "single", options = list(dom = 't'))
+    })
+
+    ## Mixture Design
+    ## Create Design
+
+    mix.comp <- reactive({
+        
+        
+        lc.mix <- mix.table.1()$Minimum.Level + 0.00001
+        uc.mix <- mix.table.1()$Maximum.Level - 0.00001
+
+        mix.comp <- Xvert(nfac = nrow(mix.table.1()),
+                          lc = lc.mix,
+                          uc = uc.mix,
+                          plot = FALSE)
+
+        if(input$mix.fillv[1]) {
+            
+            mix.comp <- Fillv(nfac = nrow(mix.table.1()),
+                              mix.comp)
+            
+        }
+
+        mix.comp
+
+    })
+
+    mix.design.table <- reactive({
+        
+        if(input$mix.amount.var[1] == TRUE) {
+
+            req(input$mix.amount.name)
+            req(input$mix.amount.levels)
+            req(input$mix.amount.min)
+            req(input$mix.amount.max)
+
+            var.min <- as.numeric(input$mix.amount.min)
+
+            var.max <- as.numeric(input$mix.amount.max)
+
+            num.levels <- as.numeric(input$mix.amount.levels)
+
+            var.step <- (var.max - var.min) / (as.numeric(num.levels) - 1)
+
+            level.vector <- seq(from = 1, to = as.numeric(num.levels), by = 1)
+
+            design.final <- data.frame()
+
+            tester.df <- if(input$mix.fillv[1] == FALSE) {
+
+                             mix.comp() %>%
+                                 select(-dimen)
+                             
+                         } else {
+
+                             mix.comp()
+                             
+                         }
+            
+
+            for(i in 1:length(level.vector)) {
+
+                if(level.vector[i] == 1) {
+
+                    level.df <- tester.df %>%
+                        mutate(Variable = var.min)
+
+                    design.final <- rbind(design.final, level.df)
+                    
+                } else if(level.vector[i] == as.numeric(num.levels)) {
+
+                    level.df <- tester.df %>%
+                        mutate(Variable = var.max)
+
+                    design.final <- rbind(design.final, level.df)
+                    
+                } else {
+
+                    level.df <- tester.df %>%
+                        mutate(Variable = ((level.vector[i] - 1) * var.step) + var.min)
+                    
+                    design.final <- rbind(design.final, level.df)
+                    
+                }
+            }
+
+            var.name <- as.character(input$mix.amount.name)
+            
+            mix.t <- design.final %>%
+                rename({{var.name}} := Variable)
+            
+        } else {
+
+            mix.t <- mix.comp()
+
+        }
+
+        mix.t.r <- sample_n(mix.t, size = nrow(mix.t), replace = F) %>%
+            mutate(Run = row_number())
+
+        if(input$mix.fillv == FALSE & input$mix.amount.var == FALSE) {
+            
+            colnames(mix.t.r) <- c(mix.table.1()$Component.Name, "dimen", "Run")
+
+        } else if(input$mix.fillv == TRUE & input$mix.amount.var == FALSE) {
+
+            colnames(mix.t.r) <- c(mix.table.1()$Component.Name, "Run")
+
+        } else { 
+
+            colnames(mix.t.r) <- c(mix.table.1()$Component.Name, var.name, "Run")
+            
+        }
+        
+        mix.t.r
+    })
+
+    
+    ## var.min <- 1
+
+    ## var.max <- 5
+
+    ## num.levels <- 2
+
+    ## tester.df <- data.frame(x1 = c(0, 1, 0, 0.333),
+    ##                         x2 = c(0, 0, 1, 0.333),
+    ##                         x3 = c(1, 0, 0, 0.333))
+
+    ## var.step <- if(num.levels > 2) {
+    
+    ##     (var.max - var.min) / (num.levels - 1)
+    
+    ##     }
+
+    ## level.vector <- 1:num.levels
+
+    ##         design.final <- data.frame()
+
+    ##         for(i in 1:length(level.vector)) {
+
+    ##             if(level.vector[i] == 1) {
+
+    ##                 level.df <- tester.df %>%
+    ##                     mutate({{input$mix.amount.name}} := var.min)
+
+    ##                 design.final <- rbind(design.final, level.df)
+    
+    ##             } else if(level.vector[i] == num.levels) {
+
+    ##                 level.df <- tester.df %>%
+    ##                     mutate({{input$mix.amount.name}} := var.max)
+
+    ##                 design.final <- rbind(design.final, level.df)
+    
+    ##             } else {
+    
+    ##                 level.df <- tester.df %>%
+    ##                     mutate({{input$mix.amount.name}} := ((level.vector[i] - 1) * var.step) + var.min)
+    
+    ##                 design.final <- rbind(design.final, level.df)
+    
+    ##             }
+    ##         }
+
+    ##     design.final
+
+    ## })
+
+    output$mix.design.comp.num <- renderText({
+
+        comp.num <- nrow(mix.design.table())
+        
+        paste("Design contains", comp.num, "runs")
+        
+    })
+    
+    
+    output$mix.comp.table <- renderTable({
+        
+        mix.design.table()
+        
+    })
+
+    ## Mixture Design
+    ## Tune Design
+
+    output$mix.amount.ui <- renderUI({
+        req(input$mix.amount.var)
+
+        tagList(
+            textInput("mix.amount.name",
+                      "Enter Amount/Process Variable Name",
+                      value = "Amount.Process.Var"),
+            textInput("mix.amount.min",
+                      "Minimum Level",
+                      value = 0),
+            textInput("mix.amount.max",
+                      "Maximum Level",
+                      value = 1),
+            numericInput("mix.amount.levels",
+                         "Number of Levels",
+                         value = 2,
+                         min = 2, max = 10)
+        )
+    })
+
+    output$mix.comp.plot <- renderPlot({
+
+        labs <- mix.table.1()$Component.Name
+
+        DesignPoints(mix.comp(),
+                     axislabs = labs,
+                     cornerlabs = labs)
+
+    })
+
+    ## Mixture Design
+    ## Download
+
+    ## Download
+
+    output$download.mix <- downloadHandler(
+
+        filename = function() {
+            paste("mix design.tsv")
+        },
+
+        content = function(file) {
+            vroom_write(mix.design.table(), file)
+        }
+    )
+
+    ## Mixture Design
+    ## Upload
+
+    output$mix.file.upload <- renderTable(input$upload.mix)
+
+    mix.df <- reactive({
+        req(input$upload.mix)
+
+        ext <- tools::file_ext(input$upload.mix$name)
+
+        mix.upload <- switch(ext,
+                             csv = vroom::vroom(input$upload.mix$datapath,
+                                                delim = ","),
+                             tsv = vroom::vroom(input$upload.mix$datapath,
+                                                delim = "\t"),
+                             validate("Invalid file: Please Upload a .csv or .tsv")
+                             )
+
+        ## validate(
+        ##     need("Run" %in% names(mix.upload),
+        ##          'Design must contain a column named "Run".')
+        ##     )
+    })
+
+    output$mix.df.upload <- renderDataTable({
+        mix.df() %>%
+            relocate(Run)
+    })
+
+
+    output$upload.mix.responses <- renderUI({
+
+        req(mix.df())
+
+        fileInput("upload.mix.responses",
+                  NULL,
+                  buttonLabel = "Upload Responses",
+                  accept = c(".csv", ".tsv"),
+                  placeholder = "Results w/ 'Run'")
+
+    })
+
+
+    mix.responses <- reactive({
+        req(input$upload.mix.responses)
+
+        ext <- tools::file_ext(input$upload.mix.responses$name)
+
+        res <- switch(ext,
+                      csv = vroom::vroom(input$upload.mix.responses$datapath,
+                                         delim = ","),
+                      tsv = vroom::vroom(input$upload.mix.responses$datapath,
+                                         delim = "\t"),
+                      validate("Invalid file: Please Upload a .csv or .tsv")
+                      )
+
+###########
+        ## Uncomment This Region for Tranformations
+########
+
+        
+        ## Mixture Design
+        ## Transformations
+        
+        
+        if(input$trans.mix) {
+
+            if(input$mix.transformation.qq == "y^(-3)") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else if(input$mix.transformation.qq == "y^(-2)") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else if(input$mix.transformation.qq == "y^(-1)") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-1)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else if(input$mix.transformation.qq == "1/sqrt(y)") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- 1 / sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else if(input$mix.transformation.qq == "log(y)") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- log(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else if(input$mix.transformation.qq == "sqrt(y)") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+
+        
+            } else if(input$mix.transformation.qq == "y^2") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else if(input$mix.transformation.qq == "y^3") {
+
+                r0 <- res
+        
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+        
+            } else {
+        
+                res
+        
+            }
+
+        } else {
+
+            res
+        }
+        
+        
+    })
+
+
+    output$mix.response.upload <- renderDataTable({
+        mix.responses() %>%
+            relocate(Run)
+    })
+
+    mix.joined <- reactive({
+
+        if(input$agg.mix) {
+            
+            res <- mix.responses() %>%
+                group_by(Run) %>%
+                summarize_all("mean", na.rm = TRUE)
+            
+        } else {
+            res <- mix.responses()
+        }                 
+        
+        mix.df() %>%
+            left_join(res, by = "Run") %>%
+            relocate(Run)
+    })
+
+    output$mix.analysis <- renderDataTable({
+        mix.joined()
+    })
+
+    ## Mixture Design
+    ## Create Mixture Model
+
+    output$mix.model.terms <- renderUI({
+
+        req(mix.joined())
+
+        mix.resp <- mix.responses() %>%
+            select(-Run)
+
+        mix.resp.choices <- colnames(mix.resp)
+
+        mix.comps <- mix.df() %>%
+            select(-Run)
+
+        mix.comps.choices <- colnames(mix.comps)
+        MixModel.types <- c("Linear Model",
+                            "Quadratic Model",
+                            "Cubic Model",
+                            "Special Cubic Model",
+                            "Model w/ Linear Process",
+                            "Model w/ Quadratic Amount")
+        
+
+        tagList(
+            selectInput("mix.select.response",
+                        "Select Response",
+                        choices = mix.resp.choices),
+            selectInput("mix.select.model.comp",
+                        "Select Mixture Components",
+                        choices = mix.comps.choices,
+                        multiple = TRUE),
+            selectInput("mix.select.proc.var",
+                        "Select Process / Amount Variable",
+                        choices = mix.comps.choices,
+                        multiple = TRUE),
+            selectInput("mix.select.model.type",
+                        "Select Model Type",
+                        choices = MixModel.types,
+                        selected = "Quadratic Model",
+                        multiple = F)
+
+        )
+    })
+
+    output$mix.model.summary <- renderPrint({
+
+        resp <- as.character(input$mix.select.response)
+        mixcomps <- as.character(input$mix.select.model.comp)
+        procvars <- as.character(input$mix.select.proc.var)
+
+        mix.mod.type.number <- switch(input$mix.select.model.type,
+                                      "Linear Model" = 1,
+                                      "Quadratic Model" = 2,
+                                      "Cubic Model" = 3,
+                                      "Special Cubic Model" = 4,
+                                      "Model w/ Linear Process" = 5,
+                                      "Model w/ Quadratic Amount" = 6)
+
+        
+        mix.model <<- MixModel(mix.joined(),
+                               response = resp,
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+        mix.model
+        
+    })
+
+    output$mix.graph.slider <- renderUI({
+
+        if(input$mix.select.model.type %in% c("Model w/ Linear Process",
+                                              "Model w/ Quadratic Amount")) {
+
+            prcv <- as.character(input$mix.select.proc.var)
+
+            proc.vect <-  mix.joined() %>%
+                pull(!!sym(prcv)) %>%
+                unique()
+
+            min.v <- min(proc.vect)
+            max.v <- max(proc.vect)
+            mid.point <- min.v + (max.v - min.v) / 2
+
+            sliderInput("mix.model.process.slider",
+                        "Select Level of Process/Amount Variable",
+                        min = min.v,
+                        max = max.v,
+                        value = mid.point)
+        }
+    })
+
+    output$mix.graph.comps <- renderUI({
+
+        req(input$mix.select.model.comp)
+        
+        mix.c1 <- input$mix.select.model.comp
+
+        checkboxGroupInput("mix.graph.comps",
+                           "Select 2-3 Components for Chart",
+                           choices = mix.c1,
+                           selected = mix.c1[1:3])
+
+    })
+    
+    output$mix.contour.plot <- renderPlot({
+
+        req(input$mix.graph.comps)
+        
+        dim.list <- list()
+
+        mixc1 <- input$mix.graph.comps
+        pvar <- input$mix.select.proc.var[1]
+        resp <- as.character(input$mix.select.response)
+
+        pvars1 <- list(process.vars = c(Salt.Strength =
+                                            as.numeric(input$mix.model.process.slider)))
+
+        for(i in 1:length(mixc1)) {
+
+            dim.list[[ paste0("x", i) ]] <- mixc1[i]
+            
+        }
+
+        min.max.vect <- vector()
+
+        for(i in 1:length(mixc1)) {
+
+            col.interest <- mix.joined() %>%
+                pull(!!sym(mixc1[i]))
+
+            min <- min(col.interest)
+            max <- max(col.interest)
+
+            min.max.vect <- c(min.max.vect, min, max)
+            
+        }
+
+        min.max.vect <- round(min.max.vect, 2)
+
+        if(length(input$mix.graph.comps) == 2) {
+
+            ## build a ggplot to show what a mixture design looks with 2 comps
+            
+        } else if (length(input$mix.graph.comps) == 3) {
+            
+            if(input$mix.select.model.type %in% c("Model w/ Linear Process",
+                                                  "Model w/ Quadratic Amount")) {
+
+                ModelPlot(model = mix.model,
+                          dimensions = dim.list,
+                          constraints = TRUE,
+                          contour =  TRUE,
+                          fill = TRUE,
+                          lims = min.max.vect,
+                          axislabs = mixc1,
+                          cornerlabs = mixc1,
+                          pseudo = TRUE,
+                          slice = pvars1,
+                          colorkey = TRUE,
+                          main = paste0(resp, " Prediction for ",
+                                        input$mix.select.model.type))
+
+            } else {
+
+                ModelPlot(model = mix.model,
+                          dimensions = dim.list,
+                          constraints = TRUE,
+                          contour =  TRUE,
+                          fill = TRUE,
+                          lims = min.max.vect,
+                          axislabs = mixc1,
+                          cornerlabs = mixc1,
+                          pseudo = TRUE,
+                          colorkey = TRUE,
+                          main = paste0(resp, " Prediction"))
+                
+            }
+            
+        } else {
+
+            ggplot() +
+                annotate("text", x = 10, y = 10,
+                         size = 6, color = "red",
+                         label = "Please Select 2-3 Mixture Components to See Predictions") +
+                theme_void()
+            
+        }
+    })
+
+    ## Mixture
+    ## Diagnostic Plots
+    
+    output$mix.diagnostic.plot <- renderPlot({
+
+        if(input$mix.diagnostic.select == "Residuals vs. Fitted") {
+
+            plot(mix.model, which = 1)
+            
+        } else if(input$mix.diagnostic.select == "Residual Q-Q") {
+
+            plot(mix.model, which = 2)
+
+        } else if(input$mix.diagnostic.select == "Scale-Location") {
+
+            plot(mix.model, which = 3)
+            
+        } else if(input$mix.diagnostic.select == "Cook's Distance") {
+
+            plot(mix.model, which = 4)
+            
+        } else if(input$mix.diagnostic.select == "Residuals vs. Leverage") {
+
+            plot(mix.model, which = 5)
+            
+        } else {
+
+            plot(mix.model, which = 6)
+            
+        }
+
+    })
+
+    ## Mixture
+
+    ###     
+
+    
+
+
+    ## Diagnostic Plots
+
+    ## Data Transformation
+    
+    output$mix.box.cox <- renderPlot({
+
+        resp <- as.character(input$mix.select.response)
+        mixcomps <- as.character(input$mix.select.model.comp)
+        procvars <- as.character(input$mix.select.proc.var)
+
+        mix.mod.type.number <- switch(input$mix.select.model.type,
+                                  "Linear Model" = 1,
+                                  "Quadratic Model" = 2,
+                                  "Cubic Model" = 3,
+                                  "Special Cubic Model" = 4,
+                                  "Model w/ Linear Process" = 5,
+                                  "Model w/ Quadratic Amount" = 6)
+
+    
+        ## mix.model <<- MixModel(mix.joined(),
+        ##                        response = resp,
+        ##                        mixcomps = mixcomps,
+        ##                        procvars = procvars,
+        ##                        model = mix.mod.type.number)
+
+        if(input$trans.mix) {
+
+            plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+            text(x = 5, y = 5, "Transformation Already Applied to Data")
+    
+        } else if(0 %in% mix.joined()[[input$mix.select.response]]) {
+
+            df <- mix.joined() %>%
+                mutate(T.sqrt = sqrt(.data[[input$mix.select.response]]),
+                       T.2 = (.data[[input$mix.select.response]])^(2),
+                       T.3 = (.data[[input$mix.select.response]])^(3),
+                       T.no = .data[[input$mix.select.response]])
+    
+
+            mod.mix.5 <- MixModel(df,
+                               response = "T.sqrt",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.6 <- MixModel(df,
+                               response = "T.2",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.7 <- MixModel(df,
+                               response = "T.3",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.8 <- MixModel(df,
+                               response = "T.no",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+            
+   
+            if(input$mix.transformation.qq == "No Transformation") {
+
+                plot(mod.mix.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+    
+            } else if(input$mix.transformation.qq == "y^(-3)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$mix.transformation.qq == "y^(-2)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+    
+            } else if(input$mix.transformation.qq == "y^(-1)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+    
+            } else if(input$mix.transformation.qq == "1/sqrt(y)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+    
+            } else if(input$mix.transformation.qq == "log(y)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+    
+            } else if(input$mix.transformation.qq == "sqrt(y)") {
+
+                plot(mod.mix.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+    
+            } else if(input$mix.transformation.qq == "y^2") {
+
+                plot(mod.mix.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+    
+            } else if(input$mix.transformation.qq == "y^3") {
+
+                plot(mod.mix.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+            }
+            
+        } else {
+    
+            df <- mix.joined() %>%
+                mutate(T.neg.3 = (.data[[input$mix.select.response]])^(-3),
+                       T.neg.2 = (.data[[input$mix.select.response]])^(-2),
+                       T.neg.1 = (.data[[input$mix.select.response]])^(-1),
+                       T.neg.sqrt = 1 / sqrt(.data[[input$mix.select.response]]),
+                       T.log = log(.data[[input$mix.select.response]]),
+                       T.sqrt = sqrt(.data[[input$mix.select.response]]),
+                       T.2 = (.data[[input$mix.select.response]])^(2),
+                       T.3 = (.data[[input$mix.select.response]])^(3),
+                       T.no = .data[[input$mix.select.response]])
+    
+
+            mod.mix.0 <- MixModel(df,
+                               response = "T.neg.3",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.1 <- MixModel(df,
+                               response = "T.neg.2",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.2 <- MixModel(df,
+                               response = "T.neg.1",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.3 <- MixModel(df,
+                               response = "T.neg.sqrt",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.4 <- MixModel(df,
+                               response = "T.log",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.5 <- MixModel(df,
+                               response = "T.sqrt",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.6 <- MixModel(df,
+                               response = "T.2",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.7 <- MixModel(df,
+                               response = "T.3",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+
+            mod.mix.8 <- MixModel(df,
+                               response = "T.no",
+                               mixcomps = mixcomps,
+                               procvars = procvars,
+                               model = mix.mod.type.number)
+            
+   
+            if(input$mix.transformation.qq == "No Transformation") {
+
+                plot(mod.mix.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+    
+            } else if(input$mix.transformation.qq == "y^(-3)") {
+
+                plot(mod.mix.0, which = 2)
+    
+                title("Q-Q Plot for y^(-3) Transformation")
+    
+            } else if(input$mix.transformation.qq == "y^(-2)") {
+
+                plot(mod.mix.1, which = 2)
+
+                title("Q-Q Plot for y^(-2) Transformation")
+    
+            } else if(input$mix.transformation.qq == "y^(-1)") {
+
+                plot(mod.mix.2, which = 2)
+
+                title("Q-Q Plot for y^(-1) Transformation")
+    
+            } else if(input$mix.transformation.qq == "1/sqrt(y)") {
+
+                plot(mod.mix.3, which = 2)
+
+                title("Q-Q Plot for 1/sqrt(y) Transformation")
+    
+            } else if(input$mix.transformation.qq == "log(y)") {
+
+                plot(mod.mix.4, which = 2)
+
+                title("Q-Q Plot for log(y) Transformation")
+    
+            } else if(input$mix.transformation.qq == "sqrt(y)") {
+
+                plot(mod.mix.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+    
+            } else if(input$mix.transformation.qq == "y^2") {
+
+                plot(mod.mix.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+    
+            } else if(input$mix.transformation.qq == "y^3") {
+
+                plot(mod.mix.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+    
+            } 
+        }         
+    })
+
+    ## Mixture
+    ## Predictions
+
+    mix.pred.t <- reactive({
+
+        
+        req(input$mix.select.response)
+        req(input$mix.select.model.comp)
+
+        des.mix.p <- mix.df() %>%
+            select(-Run)
+
+        resolution <- input$mix.pred.reso
+        
+        df.mix.p <- data.frame(Rows = 1:resolution)
+
+        names.mix.p <- colnames(des.mix.p)
+
+        for(i in 1:length(des.mix.p)) {
+
+            min <- min(des.mix.p[[i]])
+            max <- max(des.mix.p[[i]])
+            df.j <- tibble(!!names.mix.p[i] := seq(min, max, length.out = resolution))
+            df.mix.p <- cbind(df.mix.p, df.j) 
+        }
+
+        mix.vector <- input$mix.select.response
+        proc.vector <- input$mix.select.proc.var
+
+        df.opt.mix.p <- df.mix.p %>%
+            select(-Rows)
+
+        pred.df <- expand.grid(df.opt.mix.p) %>%
+            add_predictions(mix.model, var = "Predicted.Response")
+
+        ## return
+        
+        mix.vector <- input$mix.select.model.comp
+        proc.vector <- input$mix.select.proc.var
+
+        df.opt.mix.comps <- df.mix.p %>%
+            select(any_of(mix.vector))
+
+        df.opt.proc.comps <- df.mix.p %>%
+            select(any_of(proc.vector))
+
+#        mix.vector <- c("PeonyX", "WPM", "Viking.CaX1")
+
+        options.expanded <- expand.grid(df.opt.mix.comps) %>%
+            mutate(Total = round(rowSums(.), 2)) %>%
+            filter(Total == 1) %>%
+            select(-Total)
+
+        pred.df <- expand_grid(options.expanded, df.opt.proc.comps) %>%
+            add_predictions(mix.model, var = "Predicted.Response")
+
+
+        ## if(input$trans.ccd) {
+
+        ##     if(input$ccd.transformation.qq == "No Transformation") {
+
+        ##         pred.df.t <- pred.df
+
+        ##     } else if(input$ccd.transformation.qq == "y^(-3)") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = 1 / (Predicted.Response^(1/3))) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+        
+        
+        ##     } else if(input$ccd.transformation.qq == "y^(-2)") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = 1 / (Predicted.Response^(1/2))) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+
+        
+        ##     } else if(input$ccd.transformation.qq == "y^(-1)") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = 1 / (Predicted.Response)) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+
+        ##     } else if(input$ccd.transformation.qq == "1/sqrt(y)") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = 1 / (Predicted.Response^(2))) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+
+        ##     } else if(input$ccd.transformation.qq == "log(y)") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = exp(Predicted.Response)) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+        
+        ##     } else if(input$ccd.transformation.qq == "sqrt(y)") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = Predicted.Response^(2)) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+
+        ##     } else if(input$ccd.transformation.qq == "y^2") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = sqrt(Predicted.Response)) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+        
+        ##     } else if(input$ccd.transformation.qq == "y^3") {
+
+        ##         pred.df.t <- pred.df %>%
+        ##             mutate(P1 = Predicted.Response^(1/3)) %>%
+        ##             select(any_of(names.ccd.p), P1) %>%
+        ##             rename(Predicted.Response = P1)
+
+        ##     } 
+        
+        ## } else {
+        
+        ##     pred.df.t <- pred.df
+        
+        ## }
+        
+        if(input$mix.pred.opt == "Maximize") {
+            
+            options.mix.p <- pred.df  %>%
+                arrange(desc(Predicted.Response))
+            
+        } else if(input$mix.pred.opt == "Minimize") {
+
+            options.mix.p <- pred.df %>%
+                arrange(Predicted.Response)
+
+        }
+
+        options.mix.p
+        
+    })
+    
+    
+    output$mix.pred.table <- renderDataTable({
+
+        mix.pred.t()
+
+    })
+
+    ## Single Factor Design
+    ## Create Design
+
+    sfd.design <- reactiveVal()
+
+    observeEvent(input$sfd.create, {
+
+        min <- input$sfd.min
+        max <- input$sfd.max
+
+        levels <- input$sfd.levels
+
+        lev.vec <- seq(min, max, length.out = levels)
+
+        design.df <- data.frame(V1 = lev.vec)
+
+        colnames(design.df) <- input$sfd.factor.input
+
+        sfd.design(design.df)
+
+    })
+    
+    output$sfd.tune <- renderUI({
+        req(sfd.design())
+
+        tagList(
+            actionButton("sfd.add.center",
+                         "Add Center Point"),
+            actionButton("sfd.add.end.points",
+                         "Add End Points")
+        )
+    })
+
+    observeEvent(input$sfd.add.center, {
+
+        unique.level <- unique(sfd.design()[ ,1])
+        length.sfd <- length(unique.level)
+        mid.position <- ceiling(length(unique.level)/2)
+        mid.point <- unique.level[mid.position]
+        
+        df <- data.frame(V1 = mid.point)
+
+        colnames(df) <- input$sfd.factor.input
+
+        df.add <- rbind(sfd.design(), df)
+
+        sfd.design(df.add)
+        
+    })
+
+    observeEvent(input$sfd.add.end.points, {
+
+        df <- data.frame(V1 = c(input$sfd.min,
+                                input$sfd.max))
+
+        colnames(df) <- input$sfd.factor.input
+
+        df.add <- rbind(sfd.design(), df)
+
+        sfd.design(df.add)
+        
+    })
+
+    
+
+    output$sfd.design.density <- renderPlot({
+
+        req(sfd.design())
+        
+        bins <- length(unique(sfd.design()[ ,1]))
+
+        plt.df <- sfd.design()
+
+        plt.df[,1] <- as.factor(plt.df[,1])
+        
+        sfd.design() %>%
+            ggplot(aes_string(x = input$sfd.factor.input)) +
+            geom_bar(stat = "count")
+        
+    })
+
+    sfd.rand.table <- reactive({
+        
+        sample_n(sfd.design(),
+                 size = nrow(sfd.design())) %>%
+            mutate(Run = row_number())
+
+    })
+
+    output$sfd.table <- renderTable({
+
+        sfd.rand.table()
+        
+    })
+
+    output$download.sfd <- downloadHandler(
+
+        filename = function() {
+            paste("sfd design.tsv")
+        },
+
+        content = function(file) {
+            vroom_write(sfd.rand.table(), file)
+        }
+    )
+
+
+    ##  Single Factor Design
+    ## Import and View Tables
+
+    output$sfd.file.upload <- renderTable(input$upload.sfd)
+
+    sfd.df <- reactive({
+        req(input$upload.sfd)
+
+        ext <- tools::file_ext(input$upload.sfd$name)
+
+        sfd.des <- switch(ext,
+                          csv = vroom::vroom(input$upload.sfd$datapath,
+                                             delim = ","),
+                          tsv = vroom::vroom(input$upload.sfd$datapath,
+                                             delim = "\t"),
+                          validate("Invalid file: Please Upload a .csv or .tsv")
+                          )
+
+        validate(
+            need("Run" %in% names(sfd.des),
+                 'Uploaded design must contain a column named "Run".')
+        )
+
+        sfd.des
+    })
+
+    output$sfd.df.upload <- renderDataTable({
+        sfd.df() %>%
+            relocate(Run)
+    })
+
+
+    output$upload.sfd.responses <- renderUI({
+
+        req(sfd.df())
+
+        fileInput("upload.sfd.responses",
+                  NULL,
+                  buttonLabel = "Upload Responses",
+                  accept = c(".csv", ".tsv"),
+                  placeholder = "Results w/ 'Run'")
+
+    })
+
+
+    sfd.responses <- reactive({
+        req(input$upload.sfd.responses)
+
+        ext <- tools::file_ext(input$upload.sfd.responses$name)
+
+        res <- switch(ext,
+                      csv = vroom::vroom(input$upload.sfd.responses$datapath,
+                                         delim = ","),
+                      tsv = vroom::vroom(input$upload.sfd.responses$datapath,
+                                         delim = "\t"),
+                      validate("Invalid file: Please Upload a .csv or .tsv")
+                      )
+
+        validate(
+            need("Run" %in% names(res),
+                 'Uploaded design must contain a column named "Run".')
+        )
+                 
+
+        if(input$trans.sfd) {
+
+            if(input$sfd.transformation.qq == "y^(-3)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$sfd.transformation.qq == "y^(-2)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$sfd.transformation.qq == "y^(-1)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-1)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$sfd.transformation.qq == "1/sqrt(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- 1 / sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$sfd.transformation.qq == "log(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- log(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$sfd.transformation.qq == "sqrt(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+
+                
+            } else if(input$sfd.transformation.qq == "y^2") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$sfd.transformation.qq == "y^3") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else {
+                
+                res
+                
+            }
+
+        } else {
+
+            res
+            
+        }
+        
+    })
+
+
+    output$sfd.response.upload <- renderDataTable({
+        sfd.responses() %>%
+            relocate(Run)
+    })
+
+    sfd.joined <- reactive({
+
+        if(input$agg.sfd) {
+            
+            res <- sfd.responses() %>%
+                group_by(Run) %>%
+                summarize_all("mean", na.rm = TRUE)
+            
+        } else {
+            res <- sfd.responses()
+        }                 
+        
+        sfd.df() %>%
+            left_join(res, by = "Run") %>%
+            relocate(Run)
+    })
+
+    output$sfd.analysis <- renderDataTable({
+        
+        sfd.joined()
+        
+    })
+
+    ## SFD
+    ## Visualize Results
+
+    observe({
+
+        resp.y.df <- sfd.responses() %>%
+            select(-Run)
+
+        resp.y <- names(resp.y.df)
+
+        updateSelectInput(session, "sfd.y",
+                          choices = resp.y,
+                          selected = head(resp.y, 1))
+
+        resp.x.df <- sfd.df() %>%
+            select(-Run)
+
+        resp.x <- names(resp.x.df)
+
+        updateSelectInput(session, "sfd.x",
+                          choices = resp.x,
+                          selected = head(resp.x, 1))
+        
+    })
+    
+    output$sfd.vis <- renderPlot({
+
+        sfd.joined() %>%
+            ggplot(aes_string(y = input$sfd.y, x = input$sfd.x)) +
+            geom_point(size = 3) 
+
+    })
+
+    ## SFD
+    ## Set Up the Regression Model
+
+    observe({
+        req(sfd.responses())
+
+        table <- sfd.responses() %>%
+            select(-Run)
+
+        names <- names(table)
+        
+        updateSelectInput(session,
+                          "sfd.mod.response.var",
+                          choices = names)
+        
+    })
+
+
+    output$sfd.model.summary <- renderPrint({
+
+        resp <- as.character(input$sfd.mod.response.var)
+
+        resp.x.df <- sfd.df() %>%
+            select(-Run)
+
+        resp.x <- names(resp.x.df)
+
+        if(input$sfd.quad.term) {
+
+            reg.form.2 <- paste0(resp, " ~ ", resp.x, " + I(", resp.x, "^2)")
+            
+            sfd.model <<- lm(data = sfd.joined(),
+                             as.formula(reg.form.2))
+        } else {
+            
+            reg.form <- paste0(resp, " ~ ", resp.x)
+            
+            sfd.model <<- lm(data = sfd.joined(),
+                             as.formula(reg.form))
+            
+        }
+        
+        summary(sfd.model)
+
+    })
+
+    ## SFD
+    ## Model Diagnostics
+    
+    output$sfd.diagnostic.plot <- renderPlot({
+
+        if(input$sfd.diagnostic.select == "Residuals vs. Fitted") {
+
+            plot(sfd.model, which  = 1)
+            
+        } else if(input$sfd.diagnostic.select == "Residual Q-Q") {
+
+            plot(sfd.model, which = 2)
+
+        } else if(input$sfd.diagnostic.select == "Scale-Location") {
+
+            plot(sfd.model, which = 3)
+            
+        } else if(input$sfd.diagnostic.select == "Cook's Distance") {
+
+            plot(sfd.model, which = 4)
+            
+        } else if(input$sfd.diagnostic.select == "Residuals vs. Leverage") {
+
+            plot(sfd.model, which = 5)
+            
+        } else {
+
+            plot(sfd.model, which = 6)
+            
+        }
+
+    })
+
+    ## SFD
+    ## Transformation QQ plot
+
+    output$sfd.box.cox <- renderPlot({
+
+        if(input$trans.sfd) {
+
+            plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+            text(x = 5, y = 5, "Transformation Already Applied to Data")
+              
+        } else if(0 %in% sfd.joined()[[input$sfd.mod.response.var[1]]]) {
+
+            df <- sfd.joined() %>%
+                mutate(T.sqrt = sqrt(.data[[input$sfd.mod.response.var[1]]]),
+                       T.2 = (.data[[input$sfd.mod.response.var[1]]])^(2),
+                       T.3 = (.data[[input$sfd.mod.response.var[1]]])^(3),
+                       T.no = .data[[input$sfd.mod.response.var[1]]])
+
+            resp.x.df <- sfd.df() %>%
+                select(-Run)
+
+            mod.expr.sfd <- names(resp.x.df)
+           
+            mod.sfd.5 <- lm(data = df, as.formula(
+                                           paste("T.sqrt",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.6 <- lm(data = df, as.formula(
+                                           paste("T.2",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.7 <- lm(data = df, as.formula(
+                                           paste("T.3",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.8 <- lm(data = df, as.formula(
+                                           paste("T.no",
+                                                 "~",
+                                                 mod.expr.sfd)))
+            
+
+            if(input$sfd.transformation.qq == "No Transformation") {
+
+                plot(mod.sfd.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+                
+            } else if(input$sfd.transformation.qq == "y^(-3)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$sfd.transformation.qq == "y^(-2)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$sfd.transformation.qq == "y^(-1)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$sfd.transformation.qq == "1/sqrt(y)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$sfd.transformation.qq == "log(y)") {
+                
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$sfd.transformation.qq == "sqrt(y)") {
+
+                plot(mod.sfd.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "y^2") {
+
+                plot(mod.sfd.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "y^3") {
+
+                plot(mod.sfd.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+            }
+
+        } else {
+            
+            df <- sfd.joined() %>%
+                mutate(T.neg.3 = (.data[[input$sfd.mod.response.var[1]]])^(-3),
+                       T.neg.2 = (.data[[input$sfd.mod.response.var[1]]])^(-2),
+                       T.neg.1 = (.data[[input$sfd.mod.response.var[1]]])^(-1),
+                       T.neg.sqrt = 1 / sqrt(.data[[input$sfd.mod.response.var[1]]]),
+                       T.log = log(.data[[input$sfd.mod.response.var[1]]]),
+                       T.sqrt = sqrt(.data[[input$sfd.mod.response.var[1]]]),
+                       T.2 = (.data[[input$sfd.mod.response.var[1]]])^(2),
+                       T.3 = (.data[[input$sfd.mod.response.var[1]]])^(3),
+                       T.no = .data[[input$sfd.mod.response.var[1]]])
+
+            resp.x.df <- sfd.df() %>%
+                select(-Run)
+
+            mod.expr.sfd <- names(resp.x.df)
+            
+
+            mod.sfd.0 <- lm(data = df, as.formula(
+                                           paste("T.neg.3",
+                                                 "~",
+                                                 mod.expr.sfd)))
+            
+            mod.sfd.1 <- lm(data = df, as.formula(
+                                           paste("T.neg.2",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.2 <- lm(data = df, as.formula(
+                                           paste("T.neg.1",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.3 <- lm(data = df, as.formula(
+                                           paste("T.neg.sqrt",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.4 <- lm(data = df, as.formula(
+                                           paste("T.log",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.5 <- lm(data = df, as.formula(
+                                           paste("T.sqrt",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.6 <- lm(data = df, as.formula(
+                                           paste("T.2",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.7 <- lm(data = df, as.formula(
+                                           paste("T.3",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            mod.sfd.8 <- lm(data = df, as.formula(
+                                           paste("T.no",
+                                                 "~",
+                                                 mod.expr.sfd)))
+
+            if(input$sfd.transformation.qq == "No Transformation") {
+
+                plot(mod.sfd.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+                
+            } else if(input$sfd.transformation.qq == "y^(-3)") {
+
+                plot(mod.sfd.0, which = 2)
+                
+                title("Q-Q Plot for y^(-3) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "y^(-2)") {
+
+                plot(mod.sfd.1, which = 2)
+
+                title("Q-Q Plot for y^(-2) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "y^(-1)") {
+
+                plot(mod.sfd.2, which = 2)
+
+                title("Q-Q Plot for y^(-1) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "1/sqrt(y)") {
+
+                plot(mod.sfd.3, which = 2)
+
+                title("Q-Q Plot for 1/sqrt(y) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "log(y)") {
+
+                plot(mod.sfd.4, which = 2)
+
+                title("Q-Q Plot for log(y) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "sqrt(y)") {
+
+                plot(mod.sfd.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "y^2") {
+
+                plot(mod.sfd.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+                
+            } else if(input$sfd.transformation.qq == "y^3") {
+
+                plot(mod.sfd.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+                
+            } 
+        }         
+    })
+
+    ## SFD
+    ## Predictions
+
+    sfd.pred.t <- reactive({
+        
+        des.sfd.p <- sfd.df() %>%
+            select(-Run)
+
+        resolution <- input$sfd.pred.reso
+        
+        df.sfd.p <- data.frame(Rows = 1:resolution)
+
+        names.sfd.p <- colnames(des.sfd.p)
+
+        for(i in 1:length(des.sfd.p)) {
+
+            min <- min(des.sfd.p[[i]])
+            max <- max(des.sfd.p[[i]])
+            df.j <- tibble(!!names.sfd.p[i] := seq(min, max, length.out = resolution))
+            df.sfd.p <- cbind(df.sfd.p, df.j) 
+        }
+
+        df.opt.sfd.p <- df.sfd.p %>%
+            select(-Rows)
+
+        pred.df <- expand.grid(df.opt.sfd.p) %>%
+            add_predictions(sfd.model, var = "Predicted.Response")
+
+        if(input$trans.sfd) {
+
+            if(input$sfd.transformation.qq == "No Transformation") {
+
+                pred.df.t <- pred.df
+
+            } else if(input$sfd.transformation.qq == "y^(-3)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response^(1/3))) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+                
+                
+            } else if(input$sfd.transformation.qq == "y^(-2)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response^(1/2))) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+                
+            } else if(input$sfd.transformation.qq == "y^(-1)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response)) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } else if(input$sfd.transformation.qq == "1/sqrt(y)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = 1 / (Predicted.Response^(2))) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } else if(input$sfd.transformation.qq == "log(y)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = exp(Predicted.Response)) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+                
+            } else if(input$sfd.transformation.qq == "sqrt(y)") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = Predicted.Response^(2)) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } else if(input$sfd.transformation.qq == "y^2") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = sqrt(Predicted.Response)) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+                
+            } else if(input$sfd.transformation.qq == "y^3") {
+
+                pred.df.t <- pred.df %>%
+                    mutate(P1 = Predicted.Response^(1/3)) %>%
+                    select(any_of(names.sfd.p), P1) %>%
+                    rename(Predicted.Response = P1)
+
+            } 
+            
+        } else {
+            
+            pred.df.t <- pred.df
+            
+        }
+        
+        
+
+        if(input$sfd.pred.opt == "Maximize") {
+            
+            options.sfd.p <- pred.df.t  %>%
+                arrange(desc(Predicted.Response))
+            
+        } else if(input$sfd.pred.opt == "Minimize") {
+
+            options.sfd.p <- pred.df.t %>%
+                arrange(Predicted.Response)
+
+        }
+
+        options.sfd.p
+        
+    })
+    
+    
+    output$sfd.pred.table <- renderDataTable({
+
+        sfd.pred.t()
+
+    })
+
+    ## Screening
+    ## Fractional Factorial Design
+    ## Design Table
+
+    ffd.table.1 <- data.frame(Factor.Name = NULL,
+                              Factor.Lower = NULL,
+                              Factor.Upper = NULL)
+
+    ffd.table.1 <- reactiveVal(ffd.table.1)
+
+    observeEvent(input$ffd.term.enter, {
+        
+        dt <- rbind(data.frame(Factor.Name = input$ffd.factor.input,
+                               Factor.Min = input$ffd.low.level,
+                               Factor.Max = input$ffd.high.level),
+                    ffd.table.1())
+        
+        ffd.table.1(dt)
+    } )
+
+    observeEvent(input$ffd.term.delete, {
+
+        dt <- ffd.table.1()
+        print(nrow(dt))
+        if(!is.null(input$ffd.design.table_rows_selected)) {
+            dt <- dt[as.numeric(input$ffd.design.table_rows_selected),]
+        }
+        ffd.table.1(dt)
+        
+    })
+    
+
+    output$ffd.design.table <- renderDT({
+
+        ffd.dt <- ffd.table.1() %>%
+            mutate(Order.xyz123 = row_number()) %>%
+            arrange(desc(Order.xyz123)) %>%
+            select(-Order.xyz123)
+        
+        datatable(ffd.dt, selection = "single", options = list(dom = 't'))
+        
+    })
+
+    ## Resolution Image
+
+    ## output$ffd.resolution.image <- renderImage({
+
+    ##     ## filename <- normalizePath(file.path("./images",
+    ##     ##                                     "factorial design resolution table.png"))
+
+    ##     list(src = "factorial design resolution table.png",
+    ##          alt = "Resolution Table")
+    
+    ## }, deleteFile = FALSE)
+
+    ## Set up the Design Table
+    ## Error in the way the names are reloaded
+    ## Return here
+
+    ffd.factor.list <- reactive({
+
+        ordered.table <- ffd.table.1() %>%
+            mutate(Order.xyz123 = row_number()) %>%
+            arrange(desc(Order.xyz123)) %>%
+            select(-Order.xyz123)
+        
+        factor.list <- list()
+
+        for(i in 1:nrow(ordered.table)) {
+
+            list.entry <- c(ordered.table$Factor.Min[i],
+                            ordered.table$Factor.Max[i])
+
+            factor.list[[length(factor.list) + 1]] = list.entry
+
+        }
+
+        factor.names <- vector()
+
+        for(i in 1:length(ordered.table$Factor.Name)) {
+
+            name <- ordered.table$Factor.Name[i]
+
+            factor.names <- c(factor.names, name)
+            
+        }
+
+        names(factor.list) <- factor.names
+
+        factor.list
+        
+    })
+
+    output$ffd.summary <- renderPrint({
+
+        des.runs <- as.numeric(input$ffd.run.number)
+
+        des.factors <- nrow(ffd.table.1())
+        
+        req(ffd.table.1())
+
+        if(input$ffd.add.center == TRUE) {
+
+            summary(
+                FrF2(des.runs,
+                     des.factors,
+                     factor.names =
+                         ffd.factor.list(),
+                     seed = 1234,
+                     ncenter = as.numeric(input$ffd.num.center))
+                )
+            
+        } else {
+
+            summary(
+                FrF2(des.runs,
+                     des.factors,
+                     factor.names =
+                         ffd.factor.list(),
+                     seed = 1234)
+                )
+
+        }
+
+    })
+
+    ffd.table.out <- reactive({
+
+        des.runs <- as.numeric(input$ffd.run.number)
+
+        des.factors <- nrow(ffd.table.1())
+        
+        req(ffd.table.1())
+        
+         des.output.1 <- data.frame(
+
+                if(input$ffd.add.center == TRUE) {
+
+                        FrF2(des.runs,
+                             des.factors,
+                             factor.names =
+                                 ffd.factor.list(),
+                             seed = 1234,
+                             ncenter = as.numeric(input$ffd.num.center))
+                    
+                } else {
+
+                        FrF2(des.runs,
+                             des.factors,
+                             factor.names =
+                                 ffd.factor.list(),
+                             seed = 1234)
+                }
+        )
+
+        des.output.1 %>%
+            mutate(Run = row_number())
+        
+        
+    })
+
+    output$output.table.ffd <- renderTable({
+
+        ffd.table.out()
+        
+    })
+
+    output$download.ffd <- downloadHandler(
+        
+        filename = 'design information.zip',
+
+        content = function(fname) {
+
+            ## vroom_write(ffd.table.out(), fname)
+            
+            write_csv(ffd.table.out(), file = "design table.csv")
+            write_csv(ffd.table.1(), file = "design levels.csv")
+            
+            zip(zipfile=fname, files=c("design table.csv", "design levels.csv"))
+        },
+        contentType = "application/zip"
+    )
+
+
+    output$ffd.center.point <- renderUI({
+
+        ## if(is.numeric(ffd.table.1()$Factor.Min) &
+        ##    is.numeric(ffd.table.1()$Factor.Max) ) {
+
+        if(input$ffd.add.center) {
+
+            numericInput("ffd.num.center",
+                         "Number of Center Points to Add",
+                         value = 1,
+                         step = 1)
+        }
+    })
+
+
+    ## Fractional Factorial Design
+    ## Import Export Design
+
+    ## Upload
+
+                                        #output$ffd.file.upload <- renderTable(input$upload.ffd)
+
+    ffd.df <- reactive({
+        
+        req(input$upload.ffd)
+
+        ext <- tools::file_ext(input$upload.ffd$name)
+
+        switch(ext,
+               csv = vroom::vroom(input$upload.ffd$datapath,
+                                  delim = ","),
+               tsv = vroom::vroom(input$upload.ffd$datapath,
+                                  delim = "\t"),
+               validate("Invalid file: Please Upload a .csv or .tsv")
+               )
+    })
+
+    output$ffd.file.upload <- renderTable(
+
+        ffd.df()
+        
+    )
+
+
+    ffd.level.table <- reactive({
+        
+        req(input$upload.ffd.level.table)
+
+        ext <- tools::file_ext(input$upload.ffd.level.table$name)
+
+        switch(ext,
+               csv = vroom::vroom(input$upload.ffd.level.table$datapath,
+                                  delim = ","),
+               tsv = vroom::vroom(input$upload.ffd.level.table$datapath,
+                                  delim = "\t"),
+               validate("Invalid file: Please Upload a .csv or .tsv")
+               )
+    })
+
+    output$ffd.level.table.df <- renderTable(
+
+        ffd.level.table()
+        
+    )
+
+    ## Return.Here
+
+    ffd.factor.list.upload <- reactive({
+
+        req(ffd.level.table())
+
+        ordered.table <- ffd.level.table() %>%
+            mutate(Order.xyz123 = row_number()) %>%
+            arrange(desc(Order.xyz123)) %>%
+            select(-Order.xyz123)
+        
+        factor.list <- list()
+
+        for(i in 1:nrow(ordered.table)) {
+
+            list.entry <- c(ordered.table$Factor.Min[i],
+                            ordered.table$Factor.Max[i])
+
+            factor.list[[length(factor.list) + 1]] = list.entry
+
+        }
+
+        factor.names <- vector()
+
+        for(i in 1:length(ordered.table$Factor.Name)) {
+
+            name <- ordered.table$Factor.Name[i]
+
+            factor.names <- c(factor.names, name)
+            
+        }
+
+        names(factor.list) <- factor.names
+
+        factor.list
+        
+    })
+
+    ffd.design.rebuilt <- reactive({
+
+        req(ffd.df())
+        req(ffd.level.table())
+        
+        ordered.table <- ffd.level.table() %>%
+            mutate(Order.xyz123 = row_number()) %>%
+            arrange(desc(Order.xyz123)) %>%
+            select(-Order.xyz123)
+        
+        factor.list <- list()
+
+        for(i in 1:nrow(ordered.table)) {
+
+            list.entry <- c(ordered.table$Factor.Min[i],
+                            ordered.table$Factor.Max[i])
+
+            factor.list[[length(factor.list) + 1]] = list.entry
+
+        }
+
+        factor.names <- vector()
+
+        for(i in 1:length(ordered.table$Factor.Name)) {
+
+            name <- ordered.table$Factor.Name[i]
+
+            factor.names <- c(factor.names, name)
+            
+        }
+
+        names(factor.list) <- factor.names
+
+        des.runs <- nrow(ffd.df())
+
+        des.factors <- nrow(ffd.level.table())
+        
+        
+        design <- if(input$ffd.add.center == TRUE) {
+
+                FrF2(des.runs,
+                     des.factors,
+                     factor.names =
+                         ffd.factor.list.upload(),
+                     seed = 1234,
+                     ncenter = as.numeric(input$ffd.num.center))
+
+        } else {
+
+                FrF2(des.runs,
+                     des.factors,
+                     factor.names =
+                         ffd.factor.list.upload(),
+                     seed = 1234)
+
+        }
+
+        design
+        
+    })
+
+    ## output$ffd.design.upload <- renderPrint({
+
+    ##     req(ffd.df())
+    ##     req(ffd.level.table())
+    
+    ##     des.runs <- nrow(ffd.df())
+
+    ##     des.factors <- nrow(ffd.level.table())
+    
+    ##     summary(
+    ##         FrF2(des.runs,
+    ##              des.factors,
+    ##              factor.names =
+    ##                  ffd.factor.list.upload(),
+    ##              seed = 1234),
+    ##         )
+
+    ## })
+    
+
+    output$ffd.design.upload <- renderPrint({
+
+        req(ffd.design.rebuilt())
+        
+        summary(ffd.design.rebuilt())
+        
+    })
+
+
+    output$upload.ffd.responses <- renderUI({
+
+        req(ffd.df())
+
+        fileInput("upload.ffd.responses",
+                  NULL,
+                  buttonLabel = "Upload Responses",
+                  accept = c(".csv", ".tsv"),
+                  placeholder = "Results w/ 'Run'")
+
+    })
+
+
+    ffd.responses <- reactive({
+        req(input$upload.ffd.responses)
+
+        ext <- tools::file_ext(input$upload.ffd.responses$name)
+
+        res <- switch(ext,
+                      csv = vroom::vroom(input$upload.ffd.responses$datapath,
+                                         delim = ","),
+                      tsv = vroom::vroom(input$upload.ffd.responses$datapath,
+                                         delim = "\t"),
+                      validate("Invalid file: Please Upload a .csv or .tsv")
+                      )
+
+        if(input$trans.ffd) {
+
+            if(input$ffd.transformation.qq == "y^(-3)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ffd.transformation.qq == "y^(-2)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ffd.transformation.qq == "y^(-1)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (-1)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ffd.transformation.qq == "1/sqrt(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- 1 / sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ffd.transformation.qq == "log(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- log(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ffd.transformation.qq == "sqrt(y)") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- sqrt(r1[[i]])
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+
+                
+            } else if(input$ffd.transformation.qq == "y^2") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (2)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else if(input$ffd.transformation.qq == "y^3") {
+
+                r0 <- res
+                
+                r1 <- res %>%
+                    select(-1)
+
+                res.colnames <- names(res)
+
+                res.colnames <- res.colnames[-1]
+
+
+                for(i in 1:length(res.colnames)) {
+
+                    varname <- paste0(res.colnames[i], ".mykr123")
+
+                    r1[[varname]] <- r1[[i]] ^ (3)
+                }
+
+                r1$Run <- r0$Run
+
+                r2 <-  r1 %>%
+                    select(Run, contains(".mykr123"))
+
+
+                colnames(r2) <- c("Run", res.colnames)
+
+                r2
+                
+            } else {
+                
+                res
+                
+            }
+
+        } else {
+
+            res
+        }
+        
+        
+    })
+
+
+    output$ffd.response.upload <- renderDataTable({
+        ffd.responses() %>%
+            relocate(Run)
+    })
+
+    output$ffd.response.factor <- renderUI({
+
+        req(ffd.responses())
+        req(ffd.df())
+
+        ffd.resp <- ffd.responses() %>%
+            select(-Run)
+
+        names.ffd <- names(ffd.resp)
+
+        selectInput("ffd.joined.response",
+                    "Select Response to Add to Design",
+                    choices = names.ffd)
+
+    })
+
+    ffd.joined <- reactive({
+
+        resp.column <- ffd.responses() %>%
+            group_by(Run) %>%
+            summarize_all(mean) %>%
+            select(matches(input$ffd.joined.response), Run)
+
+        ## This chunk of code adds a mean value in if there is row missing from the
+        ## data.
+        ## I need to come back to this code and change it as it may cause weird
+        ## Statistical Isssue
+        ## Statistical Incompatibility
+        
+        if(nrow(resp.column) != nrow(ffd.df())) {
+
+#            helpText("Number of rows in Response table doesn't match Design table.  If necessary, try to add dummy data to 
+
+            validate("Number of rows in the Response table doesn't match Design table.  If necessary, add suitable dummy data to design, such as the mean response")
+            ## mean.resp <- as.numeric(apply(resp.column[1], 2, mean))
+            
+            ## test.df <-  data.frame(Run = 1:nrow(ffd.design.rebuilt())) %>%
+            ##     filter(!(Run %in% resp.column$Run)) %>%
+            ##     mutate(input$ffd.joined.response := mean.resp)
+
+            ## resp.column <- rbind(resp.column, test.df)
+
+        }
+
+        resp.column <- resp.column %>%
+            select(-Run)
+        
+        add.response(ffd.design.rebuilt(), resp.column[1])
+
+    })
+
+    output$ffd.analysis <- renderDataTable({
+        ffd.joined()
+    })
+
+
+    ## Fractional Factorial Design
+    ## Analysis
+    ## Half Normal Plot
+
+
+    observe({
+        req(ffd.responses())
+
+        table <- ffd.responses() %>%
+            select(-Run)
+
+
+        names <- names(table)
+        
+        updateSelectInput(session,
+                          "ffd.half.norm.term",
+                          choices = names)
+        
+    })
+
+    ffd.coef <- reactive({
+
+        req(ffd.joined())
+
+        if("STD" %in% names(ffd.df())) {
+
+            table <- ffd.df() %>%
+                select(-Run, -STD)
+            
+        } else {
+            
+            table <- ffd.df() %>%
+                select(-Run)
+            
+        }
+        
+        design.factors <- names(table)
+        
+        ## reg.df <- ffd.joined() %>%
+        ##    select(contains(input$ffd.mod.response.var), matches(fac.names))
+
+        response.name <- ffd.joined() %>%
+            tibble() %>%
+            select(-one_of(design.factors)) 
+
+        r.name <- colnames(response.name)
+
+        ## Come Back
+        ## PalmDate
+        ## I need to fix this so the input$ffdl.half.norm.term is not used to create the plots
+
+        ## in this fix, I should just use the ffd.joined df
+        
+        ## name.remove <- ffd.responses() %>%
+        ##     select(-input$ffd.half.norm.term[1])
+
+        ## input$ffd.response.factor
+        
+        ## mod.data.ffd <- ffd.joined() %>%
+        ##     select(-matches(names(name.remove)))
+
+        ## rname
+
+        mod.full.ffd <- lm(data = ffd.joined(),
+                           as.formula(
+                               paste(r.name,
+                                     "~ (.)^2")))
+
+        coef.full.ffd <- tibble(Term = names(mod.full.ffd$coefficients),
+                                Coefficient = mod.full.ffd$coefficients) %>%
+            filter(!is.na(Coefficient),
+                   Term != "(Intercept)") %>%
+            mutate(Abs.Coef = abs(Coefficient),
+                   Effect.Magnitude = ifelse(Coefficient > 0, "Positive", "Negative"))
+
+        coef.full.ffd
+        
+    })
+
+    output$half.norm.ffd <- renderPlot({
+
+        ## gghalfnorm(ffd.coef()$Abs.Coef,
+        ##            labs = ffd.coef()$Term,
+        ##            nlab = input$ffd.half.norm.labels,
+        ##            repel = TRUE)
+
+        DanielPlot(ffd.joined(), half = TRUE, alpha = input$ffd.half.norm.labels)
+
+    })
+
+    output$pareto.plot.ffd <- renderPlot({
+
+        ffd.coef() %>%
+            ggplot(aes(y = Abs.Coef, x = reorder(Term, -Abs.Coef), fill = Effect.Magnitude)) +
+            geom_col() +
+            theme(axis.text.x = element_text(angle = 90)) +
+            labs(y = "Standardized Effect",
+                 x = "Model Term")
+        
+    })
+
+    ## Fractional Factorial Design
+    ## Analysis
+    ## Main Effect Plot
+
+    output$me.plot.ffd <- renderPlot({
+
+        MEPlot(ffd.joined())
+
+    })
+
+    ## Fractional Factorial Design
+    ## Analysis
+    ## Interaction Plot
+
+    output$select.ia.factors <- renderUI({
+
+        req(ffd.df())
+
+        name.options <- ffd.df() %>%
+            select(-Run)
+
+        ffd.factor.names <- names(name.options)
+        
+        selectInput("ia.factors.ffd",
+                    "Select Factors to Add to Interaction Plot",
+                    choices = ffd.factor.names,
+                    multiple = TRUE,
+                    selected = ffd.factor.names)
+
+    })
+
+    output$ia.plot.ffd <- renderPlot({
+
+        matches <- match(names(ffd.joined()), input$ia.factors.ffd)
+        
+        selected.iaa.factors <- which(!is.na(matches))
+
+        IAPlot(ffd.joined(), select = selected.iaa.factors)
+        
+    })
+
+    ## Fractional Factorial Design
+    ## Regression Summary
+
+    ## Set Up the Regression Model
+
+    ##  This region is commented out becuase there is only 1 variable added to the regression model
+    ## and we are not doing the stepwise regression yet
+    
+    ## observe({
+    ##     req(ffd.responses())
+
+    ##     table <- ffd.responses() %>%
+    ##         select(-Run)
+
+    ##     names <- names(table)
+    
+    ##     updateSelectInput(session,
+    ##                       "ffd.mod.response.var",
+    ##                       choices = names)
+
+    ##     updateSelectInput(session,
+    ##                       "ffd.mod.response.var.step",
+    ##                       choices = names)
+    
+    ## })
+
+    observe({
+
+        ## I probably could go back and fix this code to be how it was if I
+        ## make sure the naming element exists.
+        ## The main issue is that, the way the model is constructed, it shows
+        ## all the possible interactions, not just the aliased ones.
+        
+        req(ffd.df())
+
+        if("STD" %in% names(ffd.df())) {
+
+            table <- ffd.df() %>%
+                select(-Run, -STD)
+            
+        } else {
+            
+            table <- ffd.df() %>%
+                select(-Run)
+            
+        }
+
+        names <- names(table)
+
+        t1 <- ffd.df() %>%
+            select(-Run)
+
+        factors <- names(t1)
+
+        int.vector <- vector()
+
+        for(i in 1:length(factors)) {
+
+            it.1 <- factors[i]
+
+            for(j in i:length(factors)) {
+
+                it.2 <- factors[j + 1]
+
+                if(!is.na(it.2)) {
+
+                    interaction <- paste0(it.1, ':', it.2)
+                    
+                    int.vector <- c(int.vector, interaction)
+                    
+                }
+            }
+        }
+
+        ## Commented because the only factor that should be avaialbe is the joined factor
+        
+        ## updateSelectInput(session,
+        ##                   "ffd.mod.response.var",
+        ##                   choices = names,
+        ##                   selected = names[1])
+
+        updateSelectInput(session,
+                          "ffd.mod.first",
+                          choices = names)
+
+        updateSelectInput(session,
+                          "ffd.mod.interactions",
+                          choices = int.vector)
+        
+
+    })
+    
+    mod.ffd.tidy <- reactive({
+
+        req(ffd.joined())
+
+        if("STD" %in% names(ffd.df())) {
+
+            table <- ffd.df() %>%
+                select(-Run, -STD)
+            
+        } else {
+            
+            table <- ffd.df() %>%
+                select(-Run)
+            
+        }
+        
+        design.factors <- names(table)
+
+        fac.names <- paste(design.factors, collapse = "|")
+        
+        response.name <- ffd.joined() %>%
+            tibble() %>%
+            select(-one_of(design.factors)) 
+
+        r.name <- colnames(response.name)
+        
+        mod.ffd <<- lm(data = ffd.joined(), as.formula(
+                                                paste( r.name,
+                                                      "~ (.)^2")))
+        broom::tidy(mod.ffd)
+        
+    })
+
+    mod.ffd.refactor <- data.frame()
+    
+    mod.ffd.refactor <- reactiveVal(mod.ffd.refactor)
+
+    mod.ffd.stats <- data.frame()
+    
+    mod.ffd.stats <- reactiveVal(mod.ffd.stats)
+
+    observeEvent(input$ffd.refactor, {
+
+        req(ffd.joined())
+        req(ffd.df())
+
+        first.order.string <- vector()
+
+        for(i in 1:length(input$ffd.mod.first)) {
+
+            if(input$ffd.mod.first[i] == input$ffd.mod.first[length(input$ffd.mod.first)]) {
+                
+                string <- paste0(input$ffd.mod.first[i])
+                
+            } else {
+
+                string <- paste0(input$ffd.mod.first[i], " +")
+            }
+            
+            first.order.string <- paste(first.order.string, string)
+        }
+
+        interaction.string <- vector()
+
+        if(length(input$ffd.mod.interactions) > 0) {
+            
+            for(i in 1:length(input$ffd.mod.interactions)) {
+
+                if(input$ffd.mod.interactions[i] == input$ffd.mod.interactions[length(input$ffd.mod.interactions)]) {
+                    
+                    string <- paste0(input$ffd.mod.interactions[i])
+                    
+                } else {
+
+                    string <- paste0(input$ffd.mod.interactions[i], " +")
+                }
+                
+                interaction.string <- paste(interaction.string, string)
+            }
+        }
+
+        if("STD" %in% names(ffd.df())) {
+
+            table <- ffd.df() %>%
+                select(-Run, -STD)
+            
+        } else {
+            
+            table <- ffd.df() %>%
+                select(-Run)
+            
+        }
+        
+        design.factors <- names(table)
+        
+        response.name <- ffd.joined() %>%
+            tibble() %>%
+            select(-one_of(design.factors)) 
+
+        r.name <- colnames(response.name)
+        
+        updateSelectInput(session,
+                          "ffd.mod.response.var",
+                          choices = r.name)
+
+        if(length(interaction.string) > 0) {
+
+            
+            mod.expr.ffd <- paste(first.order.string,
+                                  "+",
+                                  interaction.string)
+            
+        } else {
+
+            mod.expr.ffd <- first.order.string
+        }
+
+        mod.ffd <<- lm(data = ffd.joined(), as.formula(
+                                                paste(r.name,
+                                                      "~",
+                                                      mod.expr.ffd)))
+        
+        
+        m.tidy <- broom::tidy(mod.ffd)
+        m.glance <- broom::glance(mod.ffd) %>%
+            select(r.squared, adj.r.squared, p.value,
+                   degrees.freedom = df.residual,
+                   f.statistic = statistic,
+                   res.std.error = sigma)
+
+        mod.ffd.refactor(m.tidy)
+        mod.ffd.stats(m.glance)
+
+        output$ffd.reg.title <- renderUI({
+
+            tags$h4(paste("Regression Summary for Fractional Factorial Design"))
+            
+        })
+
+    })
+
+
+    output$ffd.lm.mod <- renderDT({
+
+        if(nrow(mod.ffd.refactor()) < 1) {
+            
+            datatable(mod.ffd.tidy(),
+                      options = list(
+                          dom = "t"))  %>%
+                formatRound(c("estimate", "std.error", "statistic"),
+                            digits = 3) 
+            
+            
+        } else {
+            
+            datatable(mod.ffd.refactor(),
+                      options = list(
+                          dom = "t"))  %>%
+                formatRound(c("estimate", "std.error", "statistic"),
+                            digits = 3) %>%
+                formatRound(c("p.value"),
+                            digits = 5)
+            
+        }
+    })
+
+    output$ffd.lm.glance <- renderDT({
+
+        req(mod.ffd.stats())
+
+        if(nrow(mod.ffd.stats() == 1)) {
+            
+            datatable(mod.ffd.stats(),
+                      options = list(
+                          dom = "t")) %>%
+                formatRound(c("r.squared", "adj.r.squared", "f.statistic", "res.std.error"),
+                            digits = 2) %>%
+                formatRound("p.value",
+                            digits = 5)
+        }
+    })
+
+    ## Fractional Factorial Design
+    ## Diagnostic Plots
+    
+    output$ffd.diagnostic.plot <- renderPlot({
+
+        if(input$ffd.diagnostic.select == "Residuals vs. Fitted") {
+
+            plot(mod.ffd, which = 1)
+            
+        } else if(input$ffd.diagnostic.select == "Residual Q-Q") {
+
+            plot(mod.ffd, which = 2)
+
+        } else if(input$ffd.diagnostic.select == "Scale-Location") {
+
+            plot(mod.ffd, which = 3)
+            
+        } else if(input$ffd.diagnostic.select == "Cook's Distance") {
+
+            plot(mod.ffd, which = 4)
+            
+        } else if(input$ffd.diagnostic.select == "Residuals vs. Leverage") {
+
+            plot(mod.ffd, which = 5)
+            
+        } else {
+
+            plot(mod.ffd, which = 6)
+            
+        }
+
+    })
+
+    ## Fractional Factorial Design
+    ## Visualize Possible Transformations
+
+    ## Transformation QQ plot
+
+    output$ffd.box.cox <- renderPlot({
+
+        if(input$trans.ffd) {
+
+            plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+            text(x = 5, y = 5, "Transformation Already Applied to Data")
+            
+        } else if(0 %in% ffd.joined()[[input$ffd.mod.response.var[1]]]) {
+
+             df <- ffd.joined() %>%
+                mutate(T.sqrt = sqrt(.data[[input$ffd.mod.response.var[1]]]),
+                       T.2 = (.data[[input$ffd.mod.response.var[1]]])^(2),
+                       T.3 = (.data[[input$ffd.mod.response.var[1]]])^(3),
+                       T.no = .data[[input$ffd.mod.response.var[1]]])
+
+            resp.x.df <- ffd.df() %>%
+                select(-Run)
+
+            mod.expr.ffd <- names(resp.x.df)
+                        
+            mod.ffd.5 <- lm(data = df, as.formula(
+                                           paste("T.sqrt",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.6 <- lm(data = df, as.formula(
+                                           paste("T.2",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.7 <- lm(data = df, as.formula(
+                                           paste("T.3",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.8 <- lm(data = df, as.formula(
+                                           paste("T.no",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            
+
+            if(input$ffd.transformation.qq == "No Transformation") {
+
+                plot(mod.ffd.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+                
+            } else if(input$ffd.transformation.qq == "y^(-3)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ffd.transformation.qq == "y^(-2)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ffd.transformation.qq == "y^(-1)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ffd.transformation.qq == "1/sqrt(y)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ffd.transformation.qq == "log(y)") {
+
+                plot(x = 0:10, y = 0:10, ann = F, bty = "n", type = "n",
+                 xaxt = "n", yaxt = "n")
+
+                text(x = 5, y = 5, "Transformation Not Possible with 0 in Results.")
+                
+            } else if(input$ffd.transformation.qq == "sqrt(y)") {
+
+                plot(mod.ffd.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "y^2") {
+
+                plot(mod.ffd.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "y^3") {
+
+                plot(mod.ffd.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+                
+            } 
+
+        } else {
+            
+            df <- ffd.joined() %>%
+                mutate(T.neg.3 = (.data[[input$ffd.mod.response.var[1]]])^(-3),
+                       T.neg.2 = (.data[[input$ffd.mod.response.var[1]]])^(-2),
+                       T.neg.1 = (.data[[input$ffd.mod.response.var[1]]])^(-1),
+                       T.neg.sqrt = 1 / sqrt(.data[[input$ffd.mod.response.var[1]]]),
+                       T.log = log(.data[[input$ffd.mod.response.var[1]]]),
+                       T.sqrt = sqrt(.data[[input$ffd.mod.response.var[1]]]),
+                       T.2 = (.data[[input$ffd.mod.response.var[1]]])^(2),
+                       T.3 = (.data[[input$ffd.mod.response.var[1]]])^(3),
+                       T.no = .data[[input$ffd.mod.response.var[1]]])
+
+            resp.x.df <- ffd.df() %>%
+                select(-Run)
+
+            mod.expr.ffd <- names(resp.x.df)
+            
+
+            mod.ffd.0 <- lm(data = df, as.formula(
+                                           paste("T.neg.3",
+                                                 "~",
+                                                 mod.expr.ffd)))
+            
+            mod.ffd.1 <- lm(data = df, as.formula(
+                                           paste("T.neg.2",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.2 <- lm(data = df, as.formula(
+                                           paste("T.neg.1",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.3 <- lm(data = df, as.formula(
+                                           paste("T.neg.sqrt",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.4 <- lm(data = df, as.formula(
+                                           paste("T.log",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.5 <- lm(data = df, as.formula(
+                                           paste("T.sqrt",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.6 <- lm(data = df, as.formula(
+                                           paste("T.2",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.7 <- lm(data = df, as.formula(
+                                           paste("T.3",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            mod.ffd.8 <- lm(data = df, as.formula(
+                                           paste("T.no",
+                                                 "~",
+                                                 mod.expr.ffd)))
+
+            
+
+            if(input$ffd.transformation.qq == "No Transformation") {
+
+                plot(mod.ffd.8, which = 2)
+
+                title("Q-Q Plot for Non-Transformed Data")
+                
+            } else if(input$ffd.transformation.qq == "y^(-3)") {
+
+                plot(mod.ffd.0, which = 2)
+                
+                title("Q-Q Plot for y^(-3) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "y^(-2)") {
+
+                plot(mod.ffd.1, which = 2)
+
+                title("Q-Q Plot for y^(-2) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "y^(-1)") {
+
+                plot(mod.ffd.2, which = 2)
+
+                title("Q-Q Plot for y^(-1) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "1/sqrt(y)") {
+
+                plot(mod.ffd.3, which = 2)
+
+                title("Q-Q Plot for 1/sqrt(y) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "log(y)") {
+
+                plot(mod.ffd.4, which = 2)
+
+                title("Q-Q Plot for log(y) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "sqrt(y)") {
+
+                plot(mod.ffd.5, which = 2)
+
+                title("Q-Q Plot for sqrt(y) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "y^2") {
+
+                plot(mod.ffd.6, which = 2)
+
+                title("Q-Q Plot for y^(2) Transformation")
+                
+            } else if(input$ffd.transformation.qq == "y^3") {
+
+                plot(mod.ffd.7, which = 2)
+
+                title("Q-Q Plot for y^(3) Transformation")
+                
+            } 
+        }         
+    })
+}
+
+
+## Run Application
+
+shinyApp(ui, server)
+
+
+
+
+
+
+ 
